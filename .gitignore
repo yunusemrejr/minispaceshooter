@@ -1,0 +1,15 @@
+# Build and generated output
+/build/
+/out/
+
+# Local agent/session metadata and diagnostics
+/.agents/
+/.codex/
+/.pi/
+/pi-session-*.json
+
+# Local editor and operating-system files
+*.swp
+*.swo
+.DS_Store
+
