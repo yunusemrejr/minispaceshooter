@@ -375,6 +375,25 @@ struct SimulationTestAccess {
         REQUIRE(game.stats().level == INT_MAX && game.stats().seconds == (double)INT_MAX);
         return true;
     }
+
+    static bool starfield_stays_dim(char *msg, int cap)
+    {
+        /* The backdrop must stay far below gameplay brightness. */
+        auto peak = [](uint32_t c) {
+            uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+            return r > g ? (r > b ? r : b) : (g > b ? g : b);
+        };
+        uint32_t dim = star_color(1), mid = star_color(2), bright = star_color(3);
+        REQUIRE(peak(bright) <= 150); /* the old near-white stars peaked at 255 */
+        REQUIRE(peak(mid) < peak(bright) && peak(dim) < peak(mid));
+        Game game;
+        Rng rng;
+        game.reset(rng, 1, 0, false);
+        int nbright = 0;
+        for (int i = 0; i < MAX_STARS; ++i) nbright += game.stars_[i].bright == 3 ? 1 : 0;
+        REQUIRE(nbright * 4 <= MAX_STARS); /* bright foreground stars stay rare */
+        return true;
+    }
 };
 } // namespace mss
 
@@ -1508,6 +1527,7 @@ const Case CASES[] = {
     {"director_fairness_vetoes", test_director_fairness_vetoes},
     {"corridor_invariant_end_to_end", test_corridor_invariant_end_to_end},
     {"art_tables", test_art_tables},
+    {"starfield_stays_dim", SimulationTestAccess::starfield_stays_dim},
     {"deep_level_soak", test_deep_level_soak},
     {"minui_menu_contract", test_minui_menu_contract},
     {"kmeans_metrics", test_kmeans_metrics},

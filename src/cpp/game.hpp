@@ -101,6 +101,11 @@ struct Star {
     uint8_t bright;
 };
 
+/* Single-pixel starfield palette (0x00RRGGBB). Tier 3 is the brightest
+ * foreground star; every tier stays far below gameplay/UI brightness so the
+ * backdrop never competes with ships and bullets. */
+uint32_t star_color(uint8_t bright);
+
 struct GameInput {
     float mx; /* -1..1 */
     float my; /* -1..1 */

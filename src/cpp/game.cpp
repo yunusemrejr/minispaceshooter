@@ -36,6 +36,15 @@ const char *KIND_NAMES[EK_COUNT] = {"DRONE", "WASP", "BRUTE", "GHOST"};
 
 } /* namespace */
 
+uint32_t star_color(uint8_t bright)
+{
+    /* Muted slate tiers on the near-black gradient: visible depth cueing that
+     * stays far below ship, bullet and UI brightness. */
+    if (bright >= 3) return 0x55638Cu;
+    if (bright == 2) return 0x39435Eu;
+    return 0x232B45u;
+}
+
 /* ------------------------------------------------------------------- reset */
 void Game::reset(Rng &rng, int starting_level, int record_score, bool keep_learning)
 {
@@ -51,7 +60,9 @@ void Game::reset(Rng &rng, int starting_level, int record_score, bool keep_learn
         Star &s = stars_[i];
         s.x = rng_.between(0.0f, PLAY_W);
         s.y = rng_.between(0.0f, PLAY_H);
-        int layer = i % 3;
+        /* Mostly dim depth pixels; bright foreground stars stay rare. */
+        int slot = i % 8;
+        int layer = slot == 0 ? 2 : (slot < 4 ? 1 : 0);
         s.speed = 6.0f + (float)layer * 8.0f + rng_.between(0.0f, 3.0f);
         s.bright = (uint8_t)(layer == 2 ? 3 : (layer == 1 ? 2 : 1));
     }
@@ -1109,9 +1120,7 @@ void Game::draw(Mui &m, bool debug) const
     }
     for (int i = 0; i < MAX_STARS; ++i) {
         const Star &s = stars_[i];
-        uint32_t c = s.bright == 3 ? art::color('w') : (s.bright == 2 ? art::color('W') : art::color('x'));
-        mui_px(&m, (int)s.x, (int)s.y, c);
-        if (s.bright == 3) mui_px(&m, (int)s.x, (int)s.y + 1, art::color('x'));
+        mui_px(&m, (int)s.x, (int)s.y, star_color(s.bright));
     }
 
     int ox = 0, oy = 0;
@@ -1268,8 +1277,7 @@ void Game::draw_attract(Mui &m) const
     }
     for (int i = 0; i < MAX_STARS; ++i) {
         const Star &s = stars_[i];
-        uint32_t c = s.bright == 3 ? art::color('w') : (s.bright == 2 ? art::color('W') : art::color('x'));
-        mui_px(&m, (int)s.x, (int)s.y, c);
+        mui_px(&m, (int)s.x, (int)s.y, star_color(s.bright));
     }
     for (int i = 0; i < MAX_PARTICLES; ++i) {
         const Particle &pt = parts_[i];
