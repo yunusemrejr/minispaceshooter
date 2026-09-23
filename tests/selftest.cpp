@@ -361,7 +361,7 @@ struct SimulationTestAccess {
         game.st_.kills = INT_MAX;
         game.st_.seconds = (double)INT_MAX - 0.001;
         game.st_.shots = INT_MAX;
-        game.spawn_player_bullet();
+        game.spawn_player_volley();
         REQUIRE(game.stats().shots == INT_MAX);
         game.check_level_progress();
         REQUIRE(game.stats().level == INT_MAX - 1); /* score saturation cannot auto-level forever */
@@ -392,6 +392,371 @@ struct SimulationTestAccess {
         int nbright = 0;
         for (int i = 0; i < MAX_STARS; ++i) nbright += game.stars_[i].bright == 3 ? 1 : 0;
         REQUIRE(nbright * 4 <= MAX_STARS); /* bright foreground stars stay rare */
+        return true;
+    }
+
+    /* ------------------------------------------------ command panel contract */
+    static bool shop_menu_contract(char *msg, int cap)
+    {
+        Rng rng;
+        Game g;
+        g.reset(rng, 1, 0, true);
+        (void)art::art_init();
+        REQUIRE(!g.shop_open() && g.shop_selection() == 0);
+        REQUIRE(g.shop_price(SHOP_SHIELD) > 0 && g.shop_price(SHOP_BASE) > 0);
+        int first_upgrade = g.shop_price(SHOP_UPGRADE);
+        REQUIRE(first_upgrade > 0);
+        /* a closed panel cannot buy anything */
+        REQUIRE(!g.shop_activate());
+        g.shop_toggle();
+        REQUIRE(g.shop_open() && g.shop_selection() == 0);
+        /* arrows wrap in both directions and never leave the row range */
+        g.shop_move(-1);
+        REQUIRE(g.shop_selection() == SHOP_COUNT - 1);
+        g.shop_move(1);
+        REQUIRE(g.shop_selection() == 0);
+        for (int i = 0; i < SHOP_COUNT; ++i) REQUIRE(g.shop_available(i));
+        /* no credits: refused, panel stays open, nothing changes */
+        REQUIRE(!g.shop_activate());
+        REQUIRE(g.shop_open() && g.credits() == 0 && g.shield_left() == 0.0f && !g.base_alive() && g.ship_level() == 0);
+        /* buying the shield spends credits, closes the panel and blocks a rebuy */
+        g.award_points(SHIELD_COST + 100);
+        int wallet = g.credits();
+        REQUIRE(g.shop_activate());
+        REQUIRE(!g.shop_open() && g.shielded());
+        REQUIRE(g.credits() == wallet - SHIELD_COST && g.shield_left() > SHIELD_TIME - 0.01f);
+        REQUIRE(!g.shop_available(SHOP_SHIELD));
+        g.shop_toggle();
+        REQUIRE(!g.shop_activate());
+        REQUIRE(g.shop_open() && g.credits() == wallet - SHIELD_COST);
+        g.shop_close();
+        REQUIRE(!g.shop_open());
+        /* closing the panel never spends: only Enter buys */
+        g.award_points(1000);
+        wallet = g.credits();
+        int shield_before = (int)g.shield_left();
+        g.shop_toggle();
+        REQUIRE(g.shop_selection() == SHOP_SHIELD && g.shop_open());
+        g.shop_close();
+        REQUIRE(!g.shop_open() && g.credits() == wallet && (int)g.shield_left() == shield_before);
+
+        /* the panel owns the keyboard: the fleet hotkeys are refused while it is
+         * focused (they used to buy anyway) and work again once it closes */
+        g.award_points(ally_spec(AK_SCOUT).cost);
+        int fleet_before = g.allies_alive();
+        int credits_before = g.credits();
+        g.shop_toggle();
+        REQUIRE(g.shop_open());
+        REQUIRE(!g.recruit(AK_SCOUT));
+        REQUIRE(g.allies_alive() == fleet_before && g.credits() == credits_before);
+        g.shop_close();
+        REQUIRE(g.recruit(AK_SCOUT));
+        REQUIRE(g.allies_alive() == fleet_before + 1);
+        REQUIRE(g.credits() == credits_before - ally_spec(AK_SCOUT).cost);
+
+        /* the upgrade ladder climbs in price and stops at its ceiling */
+        g.award_points(400000);
+        int laddered = g.ship_level();
+        int previous_price = g.shop_price(SHOP_UPGRADE);
+        while (g.shop_available(SHOP_UPGRADE)) {
+            g.shop_toggle();
+            g.shop_move(1);
+            g.shop_move(1);
+            REQUIRE(g.shop_selection() == SHOP_UPGRADE);
+            REQUIRE(g.shop_activate());
+            REQUIRE(g.ship_level() == ++laddered);
+            REQUIRE(g.shop_price(SHOP_UPGRADE) > previous_price);
+            REQUIRE(g.max_hp() == 3 + laddered);
+            previous_price = g.shop_price(SHOP_UPGRADE);
+        }
+        REQUIRE(g.ship_level() == SHIP_MAX_LEVEL && !g.shop_available(SHOP_UPGRADE));
+        g.shop_toggle();
+        g.shop_move(-1); /* wraps up onto the last row */
+        REQUIRE(g.shop_selection() == SHOP_UPGRADE);
+        wallet = g.credits();
+        REQUIRE(!g.shop_activate() && g.shop_open() && g.credits() == wallet);
+        g.shop_close();
+
+        /* the base is one purchase at a time, and losing it re-opens the slot */
+        g.shop_toggle();
+        g.shop_move(1);
+        REQUIRE(g.shop_selection() == SHOP_BASE && g.shop_activate());
+        REQUIRE(g.base_alive() && g.base_hp() == g.base_max_hp());
+        REQUIRE(!g.shop_available(SHOP_BASE));
+        g.base_.alive = false;
+        REQUIRE(g.shop_available(SHOP_BASE));
+
+        /* a finished run cannot shop, and a new run forgets every purchase */
+        g.shop_toggle();
+        REQUIRE(g.shop_open());
+        g.over_ = true;
+        REQUIRE(!g.shop_activate());
+        g.over_ = false;
+        g.reset(rng, 1, 0, true);
+        REQUIRE(!g.shop_open() && g.shop_selection() == 0 && g.credits() == 0 && g.ship_level() == 0);
+        REQUIRE(g.max_hp() == 3 && !g.shielded() && !g.base_alive());
+        REQUIRE(g.shop_price(SHOP_UPGRADE) == first_upgrade);
+        return true;
+    }
+
+    /* ------------------------------------------------------ heal shield */
+    static bool shield_protects_fleet(char *msg, int cap)
+    {
+        Rng rng;
+        Game g;
+        g.reset(rng, 1, 0, false);
+        (void)art::art_init();
+        g.dir_.grace_ = 0.0f;
+        g.dir_.out_.max_bullets = MAX_EBULLETS;
+        g.award_points(SHIELD_COST);
+        g.shop_toggle();
+        REQUIRE(g.shop_selection() == SHOP_SHIELD && g.shop_activate());
+        REQUIRE(g.shielded());
+        float left = g.shield_left();
+        REQUIRE(left > SHIELD_TIME - 0.01f && left <= SHIELD_TIME);
+
+        /* the timer runs down in real game time and then really ends */
+        GameInput idle;
+        for (int i = 0; i < 60; ++i) g.update(idle, 1.0f / 60.0f);
+        REQUIRE(std::fabs(g.shield_left() - (left - 1.0f)) < 0.02f);
+
+        /* a bullet on the nose cannot hurt the player, and the director is not
+         * told about a damage event that never landed */
+        int hp = g.player_hp();
+        int recent = g.dir_.hits_window_[g.dir_.hits_window_idx_];
+        int enemy = g.spawn_enemy(EK_GRUNT, 190.0f, 160.0f, 0.0f, 0.0f);
+        REQUIRE(enemy >= 0 && g.enemy_fire(enemy, g.p_.x, 1));
+        REQUIRE(g.ebullets_[0].alive);
+        /* Park the fired shot on the player's nose (keeping its life and policy
+         * snapshot): the shield must consume it instead of the hull. */
+        g.ebullets_[0].x = g.p_.x;
+        g.ebullets_[0].y = g.p_.y - 0.1f;
+        g.ebullets_[0].vx = 0.0f;
+        g.ebullets_[0].vy = 60.0f;
+        g.update_enemy_bullets(1.0f / 60.0f);
+        REQUIRE(!g.ebullets_[0].alive); /* the shield still consumes the shot */
+        REQUIRE(g.player_hp() == hp);
+        REQUIRE(g.stats().shielded_hits == 1);
+        REQUIRE(g.dir_.hits_window_[g.dir_.hits_window_idx_] == recent);
+
+        /* ramming inside the bubble kills the enemy and credits the player */
+        int rammer = g.spawn_enemy(EK_GRUNT, g.p_.x, g.p_.y, 0.0f, 0.0f);
+        int kills = g.stats().kills;
+        g.update_enemies(1.0f / 60.0f);
+        REQUIRE(!g.enemies_[rammer].alive && g.player_hp() == hp && g.stats().kills == kills + 1);
+
+        /* allied hulls are covered as well; the interception still counts */
+        g.award_points(ally_spec(AK_SCOUT).cost);
+        REQUIRE(g.recruit(AK_SCOUT));
+        Ally &scout = g.allies_[0];
+        scout.hurt = 0.0f;
+        int ally_hp = scout.hp;
+        g.damage_ally(scout, 99, true);
+        REQUIRE(scout.alive && scout.hp == ally_hp && g.stats().intercepted == 1);
+
+        /* once it lapses, the same hit lands again */
+        g.shield_t_ = 0.01f; /* shorter than one step, so this update ends it */
+        g.update(idle, 1.0f / 60.0f);
+        REQUIRE(!g.shielded() && g.shield_left() == 0.0f);
+        g.p_.invuln = 0.0f;
+        int hp2 = g.player_hp();
+        g.damage_player(1.0f);
+        REQUIRE(g.player_hp() == hp2 - 1);
+        /* and it cannot be bought again for free */
+        g.award_points(SHIELD_COST);
+        g.shop_toggle();
+        REQUIRE(g.shop_available(SHOP_SHIELD) && g.shop_activate() && g.shielded());
+        return true;
+    }
+
+    /* ---------------------------------------------------- floating base */
+    static bool floating_base_mechanics(char *msg, int cap)
+    {
+        Rng rng;
+        Game g;
+        g.reset(rng, 1, 0, false);
+        (void)art::art_init();
+        g.dir_.grace_ = 0.0f;
+        g.dir_.out_.max_bullets = MAX_EBULLETS;
+        /* "much more durable" than any escort is the whole point of the base */
+        REQUIRE(BASE_MAX_HP > ally_spec(AK_TITAN).hp * 4);
+        g.award_points(BASE_COST);
+        g.shop_toggle();
+        g.shop_move(1);
+        REQUIRE(g.shop_selection() == SHOP_BASE && g.shop_activate());
+        REQUIRE(g.base_alive() && g.base_hp() == g.base_max_hp() && g.base_max_hp() == BASE_MAX_HP);
+
+        /* it floats with the player instead of being left behind */
+        g.p_.x = 60.0f;
+        g.p_.y = 150.0f;
+        for (int i = 0; i < 240; ++i) g.update_base(1.0f / 60.0f);
+        REQUIRE(std::fabs(g.base_.x - g.p_.x) < 6.0f);
+        REQUIRE(g.base_.y < g.p_.y && g.base_.y > HUD_H);
+        g.p_.x = 330.0f;
+        for (int i = 0; i < 240; ++i) g.update_base(1.0f / 60.0f);
+        REQUIRE(std::fabs(g.base_.x - g.p_.x) < 6.0f);
+
+        /* it soaks enemy fire instead of the player */
+        int enemy = g.spawn_enemy(EK_GRUNT, g.base_.x, 40.0f, 0.0f, 0.0f);
+        REQUIRE(enemy >= 0);
+        REQUIRE(g.enemy_fire(enemy, g.p_.x, 1));
+        REQUIRE(g.ebullets_[0].alive);
+        /* park the shot inside the base's hull, which must soak it instead */
+        g.ebullets_[0].x = g.base_.x;
+        g.ebullets_[0].y = g.base_.y - 0.2f;
+        g.ebullets_[0].vx = 0.0f;
+        g.ebullets_[0].vy = 40.0f;
+        int hull = g.base_hp();
+        int hp = g.player_hp();
+        g.update_enemy_bullets(1.0f / 60.0f);
+        REQUIRE(!g.ebullets_[0].alive && g.base_hp() < hull && g.player_hp() == hp);
+
+        /* its turrets answer with real lasers and are credited for the kill */
+        g.kill_enemy(enemy, false);
+        int target = g.spawn_enemy(EK_GRUNT, g.base_.x + 8.0f, g.base_.y - 30.0f, 0.0f, 0.0f);
+        REQUIRE(target >= 0);
+        g.base_.fire_cd = 0.0f;
+        g.update_base(1.0f / 60.0f);
+        int lasers = 0;
+        for (Bullet &b : g.abullets_) {
+            if (!b.alive) continue;
+            ++lasers;
+            REQUIRE(b.kind == 4 && b.damage == BASE_LASER_DAMAGE && !b.policy_valid);
+            b.x = g.enemies_[target].x;
+            b.y = g.enemies_[target].y;
+            b.vx = 0.0f;
+            b.vy = 0.0f;
+        }
+        REQUIRE(lasers >= 1);
+        int base_kills = g.stats().base_kills;
+        g.update_ally_bullets(1.0f / 60.0f);
+        REQUIRE(!g.enemies_[target].alive && g.stats().base_kills == base_kills + 1);
+
+        /* automatic repair: the player first, then the most damaged escort */
+        g.p_.hp = 1;
+        g.base_.heal_cd = 0.0f;
+        g.update_base(1.0f / 60.0f);
+        REQUIRE(g.player_hp() == 2);
+        g.p_.hp = g.max_hp();
+        g.award_points(ally_spec(AK_TITAN).cost);
+        REQUIRE(g.recruit(AK_TITAN));
+        Ally &titan = g.allies_[0];
+        titan.hp = 4;
+        g.base_.heal_cd = 0.0f;
+        g.update_base(1.0f / 60.0f);
+        REQUIRE(titan.hp == 6);
+        /* a full fleet is not healed forever: nothing happens, nothing breaks */
+        for (Ally &a : g.allies_) a.hp = ally_spec(a.kind).hp;
+        g.base_.heal_cd = 0.0f;
+        g.update_base(1.0f / 60.0f);
+        REQUIRE(g.player_hp() == g.max_hp());
+
+        /* it takes a beating, dies visibly, and can be bought again */
+        int tough = g.base_hp();
+        REQUIRE(tough > 100); /* one bullet absorbed and still nearly full */
+        g.damage_base(tough - 1);
+        REQUIRE(g.base_alive() && g.base_hp() == 1);
+        g.damage_base(1);
+        REQUIRE(!g.base_alive() && g.base_hp() == 0 && g.shop_available(SHOP_BASE));
+        g.award_points(BASE_COST);
+        int wallet = g.credits();
+        g.shop_toggle();
+        g.shop_move(1);
+        REQUIRE(g.shop_activate() && g.base_alive() && g.base_hp() == BASE_MAX_HP);
+        REQUIRE(g.credits() == wallet - BASE_COST);
+
+        /* enemies that ram it die and are counted for the base */
+        g.base_.hurt = 0.0f;
+        int r = g.spawn_enemy(EK_BRUTE, g.base_.x, g.base_.y, 0.0f, 0.0f);
+        REQUIRE(r >= 0);
+        int before_hull = g.base_hp();
+        g.update_enemies(1.0f / 60.0f);
+        REQUIRE(!g.enemies_[r].alive && g.base_hp() == before_hull - BASE_RAM_DAMAGE * 2);
+
+        /* the heal shield covers the base too, and self-repair is slow but real */
+        g.award_points(SHIELD_COST);
+        g.shop_toggle();
+        REQUIRE(g.shop_selection() == SHOP_SHIELD && g.shop_activate());
+        before_hull = g.base_hp();
+        g.damage_base(40);
+        REQUIRE(g.base_alive() && g.base_hp() == before_hull && g.stats().shielded_hits > 0);
+        g.shield_t_ = 0.0f;
+        g.damage_base(30);
+        int wounded = g.base_hp();
+        g.base_.repair_t = 0.0f;
+        for (int i = 0; i < 60 * 20; ++i) g.update_base(1.0f / 60.0f);
+        REQUIRE(g.base_hp() > wounded && g.base_hp() <= g.base_max_hp());
+
+        /* a fresh run takes the base away with everything else */
+        g.reset(rng, 1, 0, false);
+        REQUIRE(!g.base_alive() && g.base_hp() == 0);
+        return true;
+    }
+
+    /* ------------------------------------------------- upgrade ladder */
+    static bool ship_upgrade_ladder(char *msg, int cap)
+    {
+        Rng rng;
+        Game g;
+        g.reset(rng, 1, 0, false);
+        (void)art::art_init();
+        REQUIRE(g.ship_level() == 0 && g.ship_volley() == 1 && g.ship_damage() == 1);
+        REQUIRE(g.max_hp() == 3 && g.player_hp() == 3);
+        int volley = g.ship_volley();
+        int damage = g.ship_damage();
+        float reload = g.ship_fire_interval();
+        g.award_points(1000000);
+        for (int lvl = 1; lvl <= SHIP_MAX_LEVEL; ++lvl) {
+            g.shop_toggle();
+            g.shop_move(1);
+            g.shop_move(1);
+            REQUIRE(g.shop_selection() == SHOP_UPGRADE && g.shop_activate());
+            REQUIRE(g.ship_level() == lvl);
+            /* every step improves the ship: more shots, more punch, faster, and
+             * one more hull plate that arrives filled */
+            REQUIRE(g.ship_volley() >= volley && g.ship_damage() >= damage);
+            REQUIRE(g.ship_fire_interval() < reload);
+            REQUIRE(g.max_hp() == 3 + lvl && g.player_hp() == g.max_hp());
+            volley = g.ship_volley();
+            damage = g.ship_damage();
+            reload = g.ship_fire_interval();
+        }
+        REQUIRE(g.ship_volley() == 6 && g.ship_damage() == 3 && g.max_hp() == 13);
+        /* the trigger pull really spawns the whole volley, at the ladder's damage */
+        int shots = g.stats().shots;
+        g.spawn_player_volley();
+        int live = 0;
+        for (const Bullet &b : g.pbullets_) {
+            if (!b.alive) continue;
+            ++live;
+            REQUIRE(b.damage == g.ship_damage());
+        }
+        REQUIRE(live == g.ship_volley() && g.stats().shots == shots + g.ship_volley());
+        /* and the wider fan still fits the pool: two volleys in the air */
+        g.spawn_player_volley();
+        live = 0;
+        for (const Bullet &b : g.pbullets_) live += b.alive ? 1 : 0;
+        REQUIRE(live == 2 * g.ship_volley());
+        /* the payoff, stated as shots-to-kill on the same target */
+        int brute = g.spawn_enemy(EK_BRUTE, 120.0f, 60.0f, 0.0f, 0.0f);
+        REQUIRE(brute >= 0);
+        int target_hp = g.enemies_[brute].max_hp;
+        REQUIRE((target_hp + g.ship_damage() - 1) / g.ship_damage() < target_hp);
+        /* the model changes with the tier */
+        REQUIRE(g.player_sprite().w >= 13 && g.player_sprite().h >= 15);
+        /* the top of the ladder cannot be bought again, and it is not free */
+        int wallet = g.credits();
+        g.shop_toggle();
+        g.shop_move(-1);
+        REQUIRE(g.shop_selection() == SHOP_UPGRADE);
+        REQUIRE(!g.shop_activate() && g.shop_open() && g.credits() == wallet);
+        g.shop_close();
+        /* the bigger hull really is more lives: it takes max_hp hits to die */
+        for (int i = 0; i < g.max_hp(); ++i) {
+            g.p_.invuln = 0.0f;
+            g.damage_player(1.0f);
+        }
+        REQUIRE(g.over() && g.player_hp() <= 0);
         return true;
     }
 };
@@ -1045,10 +1410,11 @@ bool test_art_tables(char *msg, int cap)
         std::snprintf(msg, (size_t)cap, "art::art_init() reported %d malformed rows", bad);
         return false;
     }
-    const Sprite *all[] = {&art::player,     &art::enemy_grunt, &art::enemy_wasp,  &art::enemy_brute,
-                           &art::enemy_ghost, &art::bullet_player, &art::bullet_enemy, &art::bullet_big,
-                           &art::heart_full, &art::heart_empty, &art::spark,      &art::flash_small,
-                           &art::flash_big};
+    const Sprite *all[] = {&art::player,     &art::player_mk[0], &art::player_mk[1],  &art::player_mk[2],
+                           &art::player_mk[3], &art::base,       &art::laser,        &art::enemy_grunt,
+                           &art::enemy_wasp, &art::enemy_brute, &art::enemy_ghost,   &art::bullet_player,
+                           &art::bullet_enemy, &art::bullet_big, &art::heart_full,   &art::heart_empty,
+                           &art::spark,      &art::flash_small, &art::flash_big};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) {
         const Sprite &s = *all[i];
         if (s.w <= 0 || s.h <= 0) {
@@ -1538,6 +1904,10 @@ const Case CASES[] = {
     {"policy_and_projectile_credit", SimulationTestAccess::policy_credit},
     {"actual_shot_and_spawn_caps", SimulationTestAccess::shot_caps},
     {"endless_boundaries_and_repairs", SimulationTestAccess::endless_boundaries},
+    {"command_panel_contract", SimulationTestAccess::shop_menu_contract},
+    {"heal_shield_protects_fleet", SimulationTestAccess::shield_protects_fleet},
+    {"floating_base_mechanics", SimulationTestAccess::floating_base_mechanics},
+    {"ship_upgrade_ladder", SimulationTestAccess::ship_upgrade_ladder},
     {"save_corruption_and_boundaries", test_save_corruption_and_boundaries},
     {"atomic_save_failure_and_concurrency", test_atomic_save_failure},
 };

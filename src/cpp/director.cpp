@@ -117,7 +117,11 @@ void Director::reset(Rng &rng, int starting_level, bool keep_learning)
 /* ----------------------------------------------------------------- output */
 float Director::compute_dominance(const DirectorInput &in) const
 {
-    float hp_term = (float)(in.player_hp - 1) / 2.0f;
+    /* Fraction of hull remaining.  The stock ship reads exactly as before
+     * (max 3 -> divide by 2); upgraded hulls scale with their own capacity so
+     * a 13-hull ship with 7 left is not read as "maximum dominance". */
+    int span = in.player_max_hp > 1 ? in.player_max_hp - 1 : 1;
+    float hp_term = (float)(in.player_hp - 1) / (float)span;
     float calm_term = clampf(in.time_since_damage / 15.0f, 0.0f, 1.0f);
     float acc_term = clampf(in.player_accuracy * 2.2f, 0.0f, 1.0f);
     float kill_term = clampf((float)in.level / 12.0f, 0.0f, 1.0f);

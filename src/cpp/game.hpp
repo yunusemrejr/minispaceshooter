@@ -22,13 +22,44 @@ constexpr float PLAY_H = 216.0f;
 constexpr float HUD_H = 15.0f;
 
 constexpr int MAX_ENEMIES = Caps::MAX_ENEMIES;
-constexpr int MAX_PBULLETS = 24;
+/* The pool must hold one full max-level volley in flight (6 bullets at 0.185 s
+ * reload over a 1 s flight) plus the extra shots from allies' crossfire. */
+constexpr int MAX_PBULLETS = 64;
 constexpr int MAX_EBULLETS = Caps::MAX_ENEMY_BULLETS;
 constexpr int MAX_PARTICLES = 144;
 constexpr int MAX_STARS = 56;
 constexpr int MAX_ALLIES = 4;
 constexpr int MAX_ABULLETS = 48;
 constexpr float FLEET_TOP = PLAY_H - 23.0f;
+
+/* ---------------------------------------------------------- command panel
+ *
+ * The three bottom-right options share the run wallet with the fleet.  Their
+ * prices and durations are balance decisions, not magic numbers:
+ *   SHIELD  a one-off rescue that cannot be stacked while it is running;
+ *   BASE    a durable escort that can be destroyed and bought again;
+ *   UPGRADE ten steps, each dearer than the last, each one permanently
+ *           stronger in volley size, damage, reload and hull.
+ */
+enum ShopItem : int { SHOP_SHIELD = 0, SHOP_BASE, SHOP_UPGRADE, SHOP_COUNT };
+
+constexpr float SHIELD_TIME = 60.0f;
+constexpr int SHIELD_COST = 1200;
+constexpr int BASE_COST = 6000;
+constexpr int BASE_MAX_HP = 120;
+constexpr float BASE_RELOAD = 0.55f;     /* per turret, two turrets alternate */
+constexpr float BASE_LASER_SPEED = 300.0f;
+constexpr int BASE_LASER_DAMAGE = 3;
+constexpr float BASE_HEAL_INTERVAL = 7.0f;  /* player / ally repair cadence */
+constexpr float BASE_REPAIR_INTERVAL = 12.0f; /* self-repair after this long unhurt */
+constexpr int BASE_RAM_DAMAGE = 6;       /* brute rams cost double */
+constexpr int UPGRADE_BASE_COST = 700;
+constexpr int UPGRADE_STEP_COST = 400;
+constexpr int SHIP_MAX_LEVEL = 10;
+
+/* Panel row labels and the one-line description shown in the panel header. */
+const char *shop_name(int item);
+const char *shop_desc(int item);
 
 enum AllyKind : int { AK_SCOUT = 0, AK_WING, AK_CRUISER, AK_TITAN, AK_COUNT };
 enum AllyAction : int { ALLY_GUARD = 0, ALLY_ATTACK, ALLY_EVADE, ALLY_ESCORT, ALLY_ACTIONS };
@@ -45,6 +76,17 @@ struct Ally {
     float x = 0, y = 0, fire_cd = 0, hurt = 0, decision_t = 0;
     bool policy_valid = false;
     float features[12]{}, reward = 0;
+};
+
+/* The floating base bought from the command panel.  It is not part of the
+ * learned fleet: its behaviour is deterministic (guard the player, shoot the
+ * nearest enemy, repair the fleet) so the player can reason about it. */
+struct Base {
+    bool alive = false;
+    int hp = 0, max_hp = 0;
+    float x = 0, y = 0, bob = 0;
+    float fire_cd = 0, heal_cd = 0, repair_t = 0, hurt = 0;
+    int turret = 0;
 };
 
 enum EnemyKind : int { EK_GRUNT = 0, EK_WASP, EK_BRUTE, EK_GHOST, EK_COUNT };
@@ -122,6 +164,8 @@ struct RunStats {
     int shots = 0;
     int hits = 0;
     int ally_kills = 0, allies_bought = 0, allies_lost = 0, intercepted = 0;
+    int base_kills = 0;               /* enemies destroyed by the base or its lasers */
+    int shielded_hits = 0;            /* hits the shield absorbed instead of the fleet */
 };
 
 class Game {
@@ -157,6 +201,34 @@ class Game {
     int allies_alive() const;
     int credits() const { return credits_; }
     bool recruit(int kind); /* one purchase per key press, no score deduction */
+    /* Adds score and credits together (kills, medals, level bonuses).  Public
+     * because the scripted demo/shot mode awards a starting wallet to render
+     * the full loadout; nothing else outside the simulation calls it. */
+    void award_points(int64_t points);
+
+    /* ---- bottom-right command panel: Tab focuses, arrows select, Enter buys ----
+     * While the panel is focused the game still runs, but the flight controls
+     * are inert (the caller passes neutral input and `update()` enforces it). */
+    bool shop_open() const { return shop_open_; }
+    int shop_selection() const { return shop_sel_; }
+    void shop_toggle();      /* Tab: open, or close when already open */
+    void shop_close();       /* Tab again / Esc / leaving the play screen */
+    void shop_move(int delta);
+    bool shop_activate();    /* Enter: buy the selection; true when it was bought */
+    bool shop_available(int item) const;
+    int shop_price(int item) const;
+
+    /* ---- purchased state (read-only, for the HUD and the tests) ---- */
+    bool shielded() const { return shield_t_ > 0.0f; }
+    float shield_left() const { return shield_t_; }
+    int ship_level() const { return ship_level_; }
+    int ship_volley() const;
+    int ship_damage() const;
+    float ship_fire_interval() const;
+    int max_hp() const { return p_.max_hp; }
+    bool base_alive() const { return base_.alive; }
+    int base_hp() const { return base_.hp; }
+    int base_max_hp() const { return base_.max_hp; }
     const ml::Mlp &ally_policy() const { return ally_policy_; }
     /* Diagnostic snapshot of the inbound shot schedule (lane + seconds to the
      * playfield bottom).  Used by the debug overlay and the fairness tests. */
@@ -169,6 +241,7 @@ class Game {
         float x = PLAY_W * 0.5f, y = PLAY_H - 34.0f;
         float vx = 0.0f, vy = 0.0f;
         int hp = 3;
+        int max_hp = 3; /* grows with the ship upgrade ladder */
         float fire_cd = 0.0f;
         float invuln = 0.0f;
         float engine_phase = 0.0f;
@@ -180,7 +253,7 @@ class Game {
     void finish_policy(Enemy &e, float reward);
     void spawn_wave(int trick);
     int spawn_enemy(EnemyKind kind, float x, float y, float vx, float vy);
-    void spawn_player_bullet();
+    void spawn_player_volley();
     bool enemy_fire(int idx, float aim_x, int patterns);
     void kill_enemy(int idx, bool by_player);
     void damage_player(float amount);
@@ -189,10 +262,21 @@ class Game {
     void update_player_bullets(float dt);
     void update_enemy_bullets(float dt);
     void update_enemies(float dt);
-    void award_points(int64_t points);
     void reset_allies(bool keep_learning);
     void update_allies(float dt);
     void update_ally_bullets(float dt);
+    /* ---- command panel purchases ---- */
+    bool shop_buy(int item);
+    void shop_feedback(const char *text);
+    void activate_shield();
+    void update_base(float dt);
+    void base_fire(const Enemy &target);
+    void base_heal();
+    void damage_base(int amount);
+    const Sprite &player_sprite() const;
+    void shop_row_text(int item, char *status, int status_cap, char *detail, int detail_cap) const;
+    void draw_shop(Mui &m) const;
+    void draw_shield_ring(Mui &m, float x, float y, float rx, float ry, int ox, int oy) const;
     void ally_fire(Ally &a, const Enemy &target);
     void finish_ally_policy(Ally &a, float reward);
     void damage_ally(Ally &a, int amount, bool protecting);
@@ -221,12 +305,23 @@ class Game {
     Bullet pbullets_[MAX_PBULLETS]{};
     Bullet ebullets_[MAX_EBULLETS]{};
     Ally allies_[MAX_ALLIES]{};
+    Base base_{};
     Bullet abullets_[MAX_ABULLETS]{};
     ml::Mlp ally_policy_{};
     Rng ally_rng_{}; /* purchases and allied decisions don't consume director randomness */
     int credits_ = 0;
     float fleet_message_t_ = 0;
-    char fleet_message_[48]{};
+    char fleet_message_[64]{};
+
+    /* purchases from the command panel */
+    int ship_level_ = 0;
+    float shield_t_ = 0.0f;
+    float heal_float_t_ = 0.0f; /* "+1 HULL" floater after a base repair */
+    float heal_float_x_ = 0.0f, heal_float_y_ = 0.0f;
+    bool shop_open_ = false;
+    int shop_sel_ = 0;
+    float shop_msg_t_ = 0.0f;
+    char shop_msg_[40]{};
     Particle parts_[MAX_PARTICLES]{};
     Star stars_[MAX_STARS]{};
     Director dir_{};

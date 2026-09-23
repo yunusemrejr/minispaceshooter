@@ -25,6 +25,7 @@ typedef enum {
     PK_ENTER,    /* return / kp-enter */
     PK_BACK,     /* escape */
     PK_PAUSE,    /* p */
+    PK_TAB,      /* tab: focus the bottom-right command panel */
     PK_MUTE,     /* m */
     PK_VOL_DOWN, /* [ */
     PK_VOL_UP,   /* ] */

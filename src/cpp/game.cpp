@@ -34,7 +34,41 @@ const KindStats KINDS[EK_COUNT] = {
 
 const char *KIND_NAMES[EK_COUNT] = {"DRONE", "WASP", "BRUTE", "GHOST"};
 
+/* Collision box of the floating base, taken from its art so the two can never
+ * disagree; the draw code adds a small bob that collision deliberately ignores. */
+float base_half_w() { return (float)art::base.w * 0.5f; }
+float base_half_h() { return (float)art::base.h * 0.5f; }
+
+/* Command panel rows: names for the list, one-line descriptions for the footer
+ * shown while the panel is focused.  Both must fit the panel width at scale 1
+ * (24 characters, see SHOP_W). */
+constexpr int SHOP_X = 228;
+constexpr int SHOP_W = 154;
+constexpr int SHOP_BOTTOM = 190; /* 3 px above the fleet bar */
+constexpr int SHOP_H_CLOSED = 44;
+constexpr int SHOP_H_OPEN = 54; /* grows upward: the footer appears when focused */
+
 } /* namespace */
+
+const char *shop_name(int item)
+{
+    switch (item) {
+    case SHOP_SHIELD: return "SHIELD";
+    case SHOP_BASE: return "BASE";
+    case SHOP_UPGRADE: return "UPGRADE";
+    default: return "?";
+    }
+}
+
+const char *shop_desc(int item)
+{
+    switch (item) {
+    case SHOP_SHIELD: return "HEAL SHIELD: 60S GUARD";
+    case SHOP_BASE: return "BASE: HEALER + TURRETS";
+    case SHOP_UPGRADE: return "UPGRADE: SHOTS, HULL";
+    default: return "";
+    }
+}
 
 uint32_t star_color(uint8_t bright)
 {
@@ -98,6 +132,16 @@ void Game::reset(Rng &rng, int starting_level, int record_score, bool keep_learn
     dir_changes_ = 0.0f;
     decay_t_ = 0.0f;
     over_ = false;
+    /* Purchases are per-run: no panel state, shield, base or upgrade survives a
+     * death, exactly like credits and the fleet. */
+    ship_level_ = 0;
+    shield_t_ = 0.0f;
+    base_ = Base();
+    shop_open_ = false;
+    shop_sel_ = 0;
+    shop_msg_t_ = 0.0f;
+    shop_msg_[0] = '\0';
+    heal_float_t_ = 0.0f;
     dir_.reset(rng_, starting_level, keep_learning);
     reset_allies(keep_learning);
     std::snprintf(banner_, sizeof(banner_), "LEVEL %d", starting_level);
@@ -262,7 +306,7 @@ void Game::feed_director(float dt)
     di.near_miss_rate = near_miss_rate_;
     int hits_recent = 0;
     (void)hits_recent;
-    di.hits_taken_recent = 3 - p_.hp;
+    di.hits_taken_recent = p_.max_hp - p_.hp;
     di.time_since_damage = time_since_damage_;
     int alive = 0, bullets = 0;
     for (int i = 0; i < MAX_ENEMIES; ++i) alive += enemies_[i].alive ? 1 : 0;
@@ -273,6 +317,7 @@ void Game::feed_director(float dt)
     di.level = st_.level;
     di.score = (float)st_.score;
     di.player_hp = p_.hp;
+    di.player_max_hp = p_.max_hp;
     dir_.observe(di);
 
     if (dir_.output().trick != last_trick_) {
@@ -400,25 +445,47 @@ void Game::spawn_wave(int trick)
     wave_index_ = counter((int64_t)wave_index_ + 1);
 }
 
-void Game::spawn_player_bullet()
+int Game::ship_volley() const { return 1 + ship_level_ / 2; }
+
+int Game::ship_damage() const { return 1 + ship_level_ / 4; }
+
+float Game::ship_fire_interval() const { return 0.255f - 0.007f * (float)ship_level_; }
+
+/* The ship fires its whole volley from one trigger pull: the bullets fan out
+ * symmetrically from the nose, so the ship's aim stays the centre line. */
+void Game::spawn_player_volley()
 {
-    for (int i = 0; i < MAX_PBULLETS; ++i) {
-        Bullet &b = pbullets_[i];
-        if (b.alive) continue;
-        b.alive = true;
-        b.kind = 0;
-        b.policy_valid = false;
-        b.x = p_.x;
-        b.y = p_.y - 6.0f;
-        b.vx = 0.0f;
-        b.vy = -200.0f;
-        b.life = 2.0f;
+    int volley = ship_volley();
+    float span = volley <= 1 ? 0.0f : 4.0f + 2.4f * (float)(volley - 2);
+    int damage = ship_damage();
+    bool fired = false;
+    for (int i = 0; i < volley; ++i) {
+        float offset = volley <= 1 ? 0.0f : ((float)i / (float)(volley - 1) - 0.5f) * span;
+        bool placed = false;
+        for (int k = 0; k < MAX_PBULLETS; ++k) {
+            Bullet &b = pbullets_[k];
+            if (b.alive) continue;
+            b.alive = true;
+            b.kind = 0;
+            b.policy_valid = false;
+            b.x = clampf(p_.x + offset, 3.0f, PLAY_W - 3.0f);
+            b.y = p_.y - 6.0f;
+            b.vx = 0.0f;
+            b.vy = -200.0f;
+            b.life = 2.0f;
+            b.damage = damage;
+            placed = true;
+            break;
+        }
+        if (!placed) break; /* pool exhausted: the rest of the volley is lost */
+        fired = true;
         shots_1s_++;
         st_.shots = counter((int64_t)st_.shots + 1);
         shot_accum_ += 1.0f;
-        aud_play(SFX_LASER, rng_.between(0.94f, 1.07f));
-        return;
     }
+    /* One sound per trigger pull: six copies of the same sample would be loud
+     * and would mask the rest of the mix. */
+    if (fired) aud_play(SFX_LASER, rng_.between(0.94f, 1.07f));
 }
 
 /* ------------------------------------------------------------------- firing */
@@ -484,6 +551,292 @@ bool Game::enemy_fire(int idx, float aim_x, int patterns)
         e.reward_acc += 0.05f;
     }
     return spawned > 0;
+}
+
+/* ------------------------------------------------ command panel purchases */
+int Game::shop_price(int item) const
+{
+    switch (item) {
+    case SHOP_SHIELD: return SHIELD_COST;
+    case SHOP_BASE: return BASE_COST;
+    case SHOP_UPGRADE: return UPGRADE_BASE_COST + UPGRADE_STEP_COST * ship_level_;
+    default: return 0;
+    }
+}
+
+/* An item is available when buying it would change something.  Availability is
+ * separate from affordability so the panel can explain which one is missing. */
+bool Game::shop_available(int item) const
+{
+    switch (item) {
+    case SHOP_SHIELD: return shield_t_ <= 0.0f;
+    case SHOP_BASE: return !base_.alive;
+    case SHOP_UPGRADE: return ship_level_ < SHIP_MAX_LEVEL;
+    default: return false;
+    }
+}
+
+void Game::shop_feedback(const char *text)
+{
+    std::snprintf(shop_msg_, sizeof(shop_msg_), "%s", text);
+    shop_msg_t_ = 2.8f;
+}
+
+void Game::shop_toggle()
+{
+    if (over_) return;
+    if (shop_open_) {
+        shop_close();
+        return;
+    }
+    shop_open_ = true;
+    shop_sel_ = 0;
+    shop_msg_t_ = 0.0f;
+    shop_msg_[0] = '\0';
+    aud_play(SFX_UI, 1.15f);
+}
+
+void Game::shop_close()
+{
+    if (!shop_open_) return;
+    shop_open_ = false;
+    shop_msg_t_ = 0.0f;
+    shop_msg_[0] = '\0';
+    aud_play(SFX_UI, 0.9f);
+}
+
+void Game::shop_move(int delta)
+{
+    if (!shop_open_ || delta == 0) return;
+    int next = shop_sel_ + (delta > 0 ? 1 : -1);
+    if (next < 0) next = SHOP_COUNT - 1;
+    if (next >= SHOP_COUNT) next = 0;
+    if (next == shop_sel_) return;
+    shop_sel_ = next;
+    aud_play(SFX_UI, 1.3f);
+}
+
+/* Enter.  A successful purchase closes the panel and returns the player to the
+ * fight; a refused one stays open with the reason in the footer, so a second
+ * attempt (or a different row) is one keypress away. */
+bool Game::shop_activate()
+{
+    if (!shop_open_ || over_) return false;
+    int item = shop_sel_;
+    if (item < 0 || item >= SHOP_COUNT) return false;
+    if (!shop_available(item)) {
+        switch (item) {
+        case SHOP_SHIELD: shop_feedback("SHIELD IS ALREADY UP"); break;
+        case SHOP_BASE: shop_feedback("BASE ALREADY DEPLOYED"); break;
+        default: shop_feedback("SHIP IS AT MK10 (MAX)"); break;
+        }
+        aud_play(SFX_UI, 0.75f);
+        return false;
+    }
+    int price = shop_price(item);
+    if (credits_ < price) {
+        /* Long deficits are abbreviated: the footer only fits 24 characters,
+         * and nobody reads seven-digit credit counts. */
+        int missing = price - credits_;
+        char need[32];
+        if (missing >= 100000) std::snprintf(need, sizeof(need), "NEED %dK MORE", missing / 1000);
+        else std::snprintf(need, sizeof(need), "NEED %d MORE CREDITS", missing);
+        shop_feedback(need);
+        aud_play(SFX_UI, 0.75f);
+        return false;
+    }
+    credits_ -= price;
+    shop_buy(item);
+    shop_open_ = false;
+    shop_msg_t_ = 0.0f;
+    shop_msg_[0] = '\0';
+    return true;
+}
+
+bool Game::shop_buy(int item)
+{
+    switch (item) {
+    case SHOP_SHIELD:
+        activate_shield();
+        return true;
+    case SHOP_BASE:
+        base_ = Base();
+        base_.alive = true;
+        base_.max_hp = BASE_MAX_HP;
+        base_.hp = BASE_MAX_HP;
+        base_.x = clampf(p_.x, base_half_w(), PLAY_W - base_half_w());
+        base_.y = clampf(p_.y - 30.0f, HUD_H + 24.0f, FLEET_TOP - 22.0f);
+        base_.fire_cd = 0.4f;
+        base_.heal_cd = BASE_HEAL_INTERVAL;
+        base_.repair_t = 0.0f;
+        std::snprintf(fleet_message_, sizeof(fleet_message_), "BASE ONLINE - HULL %d", base_.hp);
+        fleet_message_t_ = 2.5f;
+        explode(base_.x, base_.y, art::color('C'), 2);
+        aud_play(SFX_RECRUIT, 0.8f);
+        return true;
+    case SHOP_UPGRADE:
+        ++ship_level_;
+        /* Every step improves the ship itself: one more hull plate (filled),
+         * a wider volley and a shorter reload. */
+        p_.max_hp++;
+        if (p_.hp < p_.max_hp) ++p_.hp;
+        std::snprintf(fleet_message_, sizeof(fleet_message_), "SHIP MK%d - %d SHOT%s, %d HULL", ship_level_ + 1,
+                      ship_volley(), ship_volley() > 1 ? "S" : "", p_.max_hp);
+        fleet_message_t_ = 2.5f;
+        aud_play(SFX_LEVELUP, 1.1f);
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* 60 s of fleet-wide immunity.  Re-buying while it runs is refused, so a single
+ * purchase can never turn into permanent invulnerability. */
+void Game::activate_shield()
+{
+    shield_t_ = SHIELD_TIME;
+    std::snprintf(fleet_message_, sizeof(fleet_message_), "HEAL SHIELD %d S", (int)SHIELD_TIME);
+    fleet_message_t_ = 2.5f;
+    for (int i = 0; i < 10; ++i) {
+        float a = 6.2831853f * (float)i / 10.0f;
+        add_particle(p_.x + std::cos(a) * 10.0f, p_.y + std::sin(a) * 10.0f, std::cos(a) * 24.0f,
+                     std::sin(a) * 24.0f, 0.4f, 1, art::color('C'), 0);
+    }
+    aud_play(SFX_MEDAL, 1.15f);
+}
+
+void Game::damage_base(int amount)
+{
+    if (!base_.alive || amount <= 0) return;
+    if (shield_t_ > 0.0f) {
+        st_.shielded_hits = counter((int64_t)st_.shielded_hits + 1);
+        add_particle(base_.x, base_.y - 4.0f, 0.0f, -12.0f, 0.28f, 2, art::color('C'), 2);
+        return;
+    }
+    base_.hp -= amount;
+    base_.hurt = 0.3f;
+    base_.repair_t = 0.0f; /* self-repair only starts once the hits stop */
+    if (base_.hp <= 0) {
+        base_.hp = 0;
+        base_.alive = false;
+        explode(base_.x, base_.y, art::color('C'), 3);
+        explode(base_.x, base_.y, art::color('o'), 2);
+        std::snprintf(fleet_message_, sizeof(fleet_message_), "BASE DESTROYED - REBUY AVAILABLE");
+        fleet_message_t_ = 2.5f;
+        aud_play(SFX_EXPLODE_BIG, 0.9f);
+    } else {
+        add_particle(base_.x, base_.y - 4.0f, 0.0f, 14.0f, 0.2f, 2, art::color('C'), 2);
+        aud_play(SFX_HIT_ENEMY, 0.7f);
+    }
+}
+
+void Game::base_fire(const Enemy &target)
+{
+    Base &b = base_;
+    int turret = b.turret;
+    b.turret = 1 - b.turret;
+    for (Bullet &bul : abullets_) {
+        if (bul.alive) continue;
+        bul = Bullet();
+        bul.alive = true;
+        bul.kind = 4; /* base laser: credited to the base, not to the fleet policy */
+        bul.damage = BASE_LASER_DAMAGE;
+        bul.policy_valid = false;
+        bul.x = b.x + (turret == 0 ? -7.0f : 7.0f);
+        bul.y = b.y + 5.0f;
+        float lead = clampf((bul.y - target.y) / BASE_LASER_SPEED, 0.0f, 0.6f);
+        float dx = target.x + target.vx * lead - bul.x;
+        float dy = target.y + target.vy * lead - bul.y;
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 0.01f) len = 0.01f;
+        bul.vx = BASE_LASER_SPEED * dx / len;
+        bul.vy = BASE_LASER_SPEED * dy / len;
+        bul.life = 1.2f;
+        aud_play(SFX_ALLY_SHOT, 1.35f);
+        return;
+    }
+}
+
+/* "automatically gives us health": one hull point to the player when hurt, and
+ * otherwise a two-point repair to the most damaged escort. */
+void Game::base_heal()
+{
+    float hx = p_.x, hy = p_.y;
+    if (p_.hp < p_.max_hp) {
+        ++p_.hp;
+    } else {
+        Ally *worst = nullptr;
+        float lowest = 1.0f;
+        for (Ally &a : allies_) {
+            if (!a.alive) continue;
+            float frac = (float)a.hp / (float)ally_spec(a.kind).hp;
+            if (frac < lowest) {
+                lowest = frac;
+                worst = &a;
+            }
+        }
+        if (!worst) return; /* nothing to repair: stay quiet instead of flashing */
+        int cap = ally_spec(worst->kind).hp;
+        worst->hp = worst->hp + 2 > cap ? cap : worst->hp + 2;
+        hx = worst->x;
+        hy = worst->y;
+    }
+    heal_float_x_ = hx;
+    heal_float_y_ = hy - 12.0f;
+    heal_float_t_ = 0.8f;
+    add_particle(hx, hy, 0.0f, -16.0f, 0.45f, 2, art::color('E'), 2);
+    aud_play(SFX_RECRUIT, 1.4f);
+}
+
+void Game::update_base(float dt)
+{
+    Base &b = base_;
+    if (!b.alive) return;
+    b.hurt = clampf(b.hurt - dt, 0.0f, 1.0f);
+    b.bob += dt;
+    b.repair_t += dt;
+
+    /* Floats with the player: a fixed station above the ship, with the same
+     * smoothing on both axes so it never snaps or lags far behind. */
+    float tx = clampf(p_.x, base_half_w() + 2.0f, PLAY_W - base_half_w() - 2.0f);
+    float ty = clampf(p_.y - 30.0f, HUD_H + 24.0f, FLEET_TOP - 22.0f);
+    float k = clampf(dt * 2.6f, 0.0f, 1.0f);
+    b.x += (tx - b.x) * k;
+    b.y += (ty - b.y) * k;
+
+    /* Turrets answer the enemy closest to the player, which is the one that
+     * will shoot at us first. */
+    b.fire_cd -= dt;
+    if (b.fire_cd <= 0.0f) {
+        const Enemy *target = nullptr;
+        float best = 1e9f;
+        for (const Enemy &e : enemies_) {
+            if (!e.alive || e.y < HUD_H || e.y > b.y + 8.0f) continue;
+            float d = sq(e.x - p_.x) + sq(e.y - p_.y);
+            if (d < best) {
+                best = d;
+                target = &e;
+            }
+        }
+        if (target) {
+            base_fire(*target);
+            b.fire_cd = BASE_RELOAD;
+        } else {
+            b.fire_cd = 0.15f; /* idle re-check; nothing to shoot at yet */
+        }
+    }
+
+    /* Automatic repair of the fleet, and slow self-repair when unhurt. */
+    b.heal_cd -= dt;
+    if (b.heal_cd <= 0.0f) {
+        b.heal_cd = BASE_HEAL_INTERVAL;
+        base_heal();
+    }
+    if (b.hp < b.max_hp && b.repair_t >= BASE_REPAIR_INTERVAL) {
+        ++b.hp;
+        b.repair_t = 0.0f;
+        add_particle(b.x, b.y + 4.0f, 0.0f, -12.0f, 0.3f, 2, art::color('E'), 2);
+    }
 }
 
 /* ------------------------------------------------------------------ policy */
@@ -725,11 +1078,30 @@ void Game::update_enemies(float dt)
             }
         }
         if (!e.alive) continue;
-        /* Ramming costs the player but also destroys the ship. */
-        if (p_.invuln <= 0.0f && std::fabs(e.x - p_.x) < (hw + 4.0f) &&
-            std::fabs(e.y - p_.y) < ((float)KINDS[e.kind].h * 0.5f + 4.0f)) {
-            kill_enemy(i, false);
-            damage_player(1.0f);
+        /* The base is a physical obstacle: enemies that run into it are
+         * destroyed and take a bite out of its much larger hull. */
+        if (base_.alive && std::fabs(e.x - base_.x) < hw + base_half_w() &&
+            std::fabs(e.y - base_.y) < (float)KINDS[e.kind].h * 0.5f + base_half_h()) {
+            damage_base(e.kind == EK_BRUTE ? BASE_RAM_DAMAGE * 2 : BASE_RAM_DAMAGE);
+            kill_enemy(i, true);
+            st_.base_kills = counter((int64_t)st_.base_kills + 1);
+        }
+        if (!e.alive) continue;
+        /* Ramming costs the player but also destroys the ship.  Inside the heal
+         * shield it is the other way round: the enemy dies and we are credited. */
+        if (p_.invuln <= 0.0f || shield_t_ > 0.0f) {
+            if (std::fabs(e.x - p_.x) < (hw + 4.0f) &&
+                std::fabs(e.y - p_.y) < ((float)KINDS[e.kind].h * 0.5f + 4.0f)) {
+                bool bubble = shield_t_ > 0.0f;
+                kill_enemy(i, bubble);
+                if (bubble) {
+                    st_.shielded_hits = counter((int64_t)st_.shielded_hits + 1);
+                    add_particle(p_.x, p_.y, 0.0f, -14.0f, 0.28f, 2, art::color('C'), 2);
+                    aud_play(SFX_HIT_ENEMY, 0.7f);
+                } else {
+                    damage_player(1.0f);
+                }
+            }
         }
     }
 }
@@ -753,7 +1125,7 @@ void Game::update_player_bullets(float dt)
             float hh = (float)KINDS[e.kind].h * 0.5f + 1.0f;
             if (std::fabs(b.x - e.x) < hw && std::fabs(b.y - e.y) < hh) {
                 b.alive = false;
-                e.hp--;
+                e.hp -= b.damage;
                 hit_accum_ += 1.0f;
                 st_.hits = counter((int64_t)st_.hits + 1);
                 e.reward_acc -= 0.35f;
@@ -783,6 +1155,13 @@ void Game::update_enemy_bullets(float dt)
             continue;
         }
         if (intercept_bullet(b)) continue;
+        /* The base soaks the shots that cross it, which is most of what makes
+         * it worth its price; big shots hurt it more. */
+        if (base_.alive && std::fabs(b.x - base_.x) < base_half_w() && std::fabs(b.y - base_.y) < base_half_h()) {
+            b.alive = false;
+            damage_base(b.kind == 2 ? 3 : 1);
+            continue;
+        }
         /* near miss: crossed the player's row with no contact */
         if (prev_y <= p_.y && b.y > p_.y) {
             float d = std::fabs(b.x - p_.x);
@@ -854,6 +1233,15 @@ void Game::damage_player(float amount)
 {
     if (p_.invuln > 0.0f || over_) return;
     (void)amount;
+    /* The heal shield absorbs the hit completely, and the director must not be
+     * told about a damage event that never landed. */
+    if (shield_t_ > 0.0f) {
+        st_.shielded_hits = counter((int64_t)st_.shielded_hits + 1);
+        p_.hurt_flash = 0.18f;
+        add_particle(p_.x, p_.y, 0.0f, -14.0f, 0.28f, 2, art::color('C'), 2);
+        aud_play(SFX_HIT_ENEMY, 0.7f);
+        return;
+    }
     p_.hp--;
     p_.invuln = 1.8f;
     p_.hurt_flash = 0.35f;
@@ -898,7 +1286,7 @@ void Game::check_level_progress()
         next_score_checkpoint_ = counter((int64_t)next_score_checkpoint_ + 2500 + (int64_t)st_.level * 250);
         dir_.event_level_up(st_.level);
         std::snprintf(banner_, sizeof(banner_), "LEVEL %d", st_.level);
-        if (st_.level % 5 == 0 && p_.hp < 3) {
+        if (st_.level % 5 == 0 && p_.hp < p_.max_hp) {
             ++p_.hp;
             std::snprintf(banner_, sizeof(banner_), "LEVEL %d  HULL +1", st_.level);
         }
@@ -936,6 +1324,14 @@ void Game::update(const GameInput &in, float dt)
     input.my = std::isfinite(in.my) ? clampf(in.my, -1.0f, 1.0f) : 0.0f;
     float magnitude = std::sqrt(input.mx * input.mx + input.my * input.my);
     if (magnitude > 1.0f) { input.mx /= magnitude; input.my /= magnitude; }
+    /* The command panel owns the keyboard while it is focused: the ship holds
+     * still and stops firing, but the world keeps running.  That is the price
+     * of shopping mid-fight, and the reason the shield exists. */
+    if (shop_open_) {
+        input.mx = 0.0f;
+        input.my = 0.0f;
+        input.fire = false;
+    }
     int steps = (int)std::ceil(dt / (1.0f / 60.0f));
     for (int i = 0; i < steps && !over_; ++i) update_step(input, dt / (float)steps);
 }
@@ -975,8 +1371,8 @@ void Game::update_step(const GameInput &in, float dt)
 
     p_.fire_cd -= dt;
     if (in.fire && p_.fire_cd <= 0.0f) {
-        p_.fire_cd = 0.255f;
-        spawn_player_bullet();
+        p_.fire_cd = ship_fire_interval();
+        spawn_player_volley();
     }
 
     /* ---- spawning ---- */
@@ -994,6 +1390,7 @@ void Game::update_step(const GameInput &in, float dt)
     }
 
     update_allies(dt);
+    update_base(dt);
     update_enemies(dt);
     update_player_bullets(dt);
     update_ally_bullets(dt);
@@ -1009,6 +1406,19 @@ void Game::update_step(const GameInput &in, float dt)
     if (shake_ > 0.0f) shake_ = shake_ > dt * 6.0f ? shake_ - dt * 6.0f : 0.0f;
     if (hit_flash_ > 0.0f) hit_flash_ -= dt;
     if (fleet_message_t_ > 0.0f) fleet_message_t_ -= dt;
+    if (shop_msg_t_ > 0.0f) shop_msg_t_ -= dt;
+    if (heal_float_t_ > 0.0f) heal_float_t_ -= dt;
+
+    /* ---- purchased timers ---- */
+    if (shield_t_ > 0.0f) {
+        shield_t_ -= dt;
+        if (shield_t_ <= 0.0f) {
+            shield_t_ = 0.0f;
+            std::snprintf(fleet_message_, sizeof(fleet_message_), "HEAL SHIELD DOWN");
+            fleet_message_t_ = 2.0f;
+            aud_play(SFX_UI, 0.8f);
+        }
+    }
 
     /* lane occupancy smoothing for the debug overlay */
     for (int i = 0; i < LANES; ++i) {
@@ -1060,8 +1470,8 @@ void Game::draw_hud(Mui &m) const
     if (st_.level < 10000) mui_textf(&m, 62, 3, th.accent, 1, "LV%02d", st_.level);
     else if (st_.level < 1000000) mui_textf(&m, 62, 3, th.accent, 1, "LV%dK", st_.level / 1000);
     else mui_textf(&m, 62, 3, th.accent, 1, "LV%dM", st_.level / 1000000);
-    /* lives as hearts */
-    for (int i = 0; i < 3; ++i) {
+    /* lives as hearts: the row grows with the upgrade ladder (3..13) */
+    for (int i = 0; i < p_.max_hp; ++i) {
         const Sprite &s = (i < p_.hp) ? art::heart_full : art::heart_empty;
         mui_blit(&m, s.px, s.w, s.h, 108 + i * 9, 4, 0);
     }
@@ -1095,6 +1505,109 @@ void Game::draw_hud(Mui &m) const
     }
 }
 
+/* Row text for the command panel: the right-hand status column and the detail
+ * line before it.  One owner for these strings, so the panel and the fleet-bar
+ * readout can never disagree about what a row says. */
+void Game::shop_row_text(int item, char *status, int status_cap, char *detail, int detail_cap) const
+{
+    switch (item) {
+    case SHOP_SHIELD:
+        if (shield_t_ > 0.0f) {
+            int left = (int)(shield_t_ + 0.999f); /* whole seconds, always shown as left */
+            std::snprintf(status, (size_t)status_cap, "%dS", left);
+            std::snprintf(detail, (size_t)detail_cap, "GUARD UP");
+        } else {
+            std::snprintf(status, (size_t)status_cap, "%d", shop_price(item));
+            std::snprintf(detail, (size_t)detail_cap, "60S GUARD");
+        }
+        break;
+    case SHOP_BASE:
+        if (base_.alive) {
+            std::snprintf(status, (size_t)status_cap, "%d%%", base_.hp * 100 / base_.max_hp);
+            std::snprintf(detail, (size_t)detail_cap, "FOLLOWING");
+        } else {
+            std::snprintf(status, (size_t)status_cap, "%d", shop_price(item));
+            std::snprintf(detail, (size_t)detail_cap, "HEAL+FIRE");
+        }
+        break;
+    default:
+        if (ship_level_ >= SHIP_MAX_LEVEL) {
+            std::snprintf(status, (size_t)status_cap, "MAX");
+            std::snprintf(detail, (size_t)detail_cap, "TOP MODEL");
+        } else {
+            std::snprintf(status, (size_t)status_cap, "%d", shop_price(item));
+            std::snprintf(detail, (size_t)detail_cap, "MK%d > MK%d", ship_level_ + 1, ship_level_ + 2);
+        }
+        break;
+    }
+}
+
+/* ----------------------------------------------------------------- draw_shop
+ *
+ * Bottom-right command panel.  It is drawn *under* the entities on purpose:
+ * the player's ship can fly through that corner, and losing sight of your ship
+ * to a menu would be a worse trade than a menu crossed by a stray bullet.  The
+ * panel expands upward while focused so its bottom edge never moves. */
+void Game::draw_shop(Mui &m) const
+{
+    if (over_) return;
+    const int w = SHOP_W;
+    const int h = shop_open_ ? SHOP_H_OPEN : SHOP_H_CLOSED;
+    const int x = SHOP_X;
+    const int y = SHOP_BOTTOM - h;
+
+    mui_rect_blend(&m, x, y, w, h, MUI_RGB(0x06, 0x08, 0x11), shop_open_ ? 235 : 190);
+    mui_rect_outline(&m, x, y, w, h, shop_open_ ? m.th.accent : m.th.panel_edge);
+    mui_text(&m, x + 4, y + 3, "COMMAND", shop_open_ ? m.th.accent : m.th.text_dim, 1);
+    mui_text_right(&m, x + w - 4, y + 3, shop_open_ ? "TAB=EXIT" : "[TAB]", m.th.text_dim, 1);
+    mui_hline(&m, x + 2, y + 11, w - 4, m.th.panel_edge);
+
+    for (int i = 0; i < SHOP_COUNT; ++i) {
+        const int ry = y + 14 + i * 10;
+        const bool sel = shop_open_ && i == shop_sel_;
+        const bool available = shop_available(i);
+        const int price = shop_price(i);
+        const bool affordable = credits_ >= price;
+        char status[16];
+        char detail[32];
+        shop_row_text(i, status, (int)sizeof(status), detail, (int)sizeof(detail));
+        uint32_t col = !available ? m.th.text_dim : (affordable ? m.th.text_strong : m.th.text);
+        uint32_t scol = !available ? m.th.warn : (affordable ? m.th.text : m.th.text_dim);
+        if (sel) mui_rect_blend(&m, x + 2, ry - 1, w - 4, 10, m.th.accent, 52);
+        if (sel) mui_text(&m, x + 4, ry, ">", m.th.text_strong, 1);
+        mui_text(&m, x + 12, ry, shop_name(i), col, 1);
+        mui_text_right(&m, x + w - 5, ry, status, scol, 1);
+        mui_text_right(&m, x + w - 5 - mui_text_w(status, 1) - 7, ry, detail, m.th.text_dim, 1);
+    }
+
+    if (shop_open_) {
+        mui_hline(&m, x + 2, y + 45, w - 4, m.th.panel_edge);
+        if (shop_msg_t_ > 0.0f) mui_text(&m, x + 4, y + 47, shop_msg_, m.th.warn, 1);
+        else mui_text(&m, x + 4, y + 47, shop_desc(shop_sel_), m.th.text, 1);
+    }
+}
+
+/* A dotted energy ellipse around every protected ship.  Forty samples keep it
+ * readable at this resolution and cost nothing next to the rest of the frame. */
+void Game::draw_shield_ring(Mui &m, float x, float y, float rx, float ry, int ox, int oy) const
+{
+    const int phase = (int)(shield_t_ * 10.0f) & 1;
+    for (int i = 0; i < 40; ++i) {
+        float a = 6.2831853f * (float)i / 40.0f;
+        uint32_t col = ((i + phase) & 1) ? art::color('C') : art::color('c');
+        mui_px(&m, (int)(x + std::cos(a) * rx) + ox, (int)(y + std::sin(a) * ry) + oy, col);
+    }
+}
+
+const Sprite &Game::player_sprite() const
+{
+    /* One model per three upgrade levels: stock, then four upper models with
+     * the tenth step getting the elite hull. */
+    int tier = ship_level_ == 0 ? 0 : 1 + (ship_level_ - 1) / 3;
+    if (tier <= 0) return art::player;
+    return art::player_mk[tier - 1];
+}
+
 void Game::draw_banner(Mui &m) const
 {
     if (banner_t_ <= 0.0f || banner_[0] == '\0') return;
@@ -1122,6 +1635,10 @@ void Game::draw(Mui &m, bool debug) const
         const Star &s = stars_[i];
         mui_px(&m, (int)s.x, (int)s.y, star_color(s.bright));
     }
+
+    /* The command panel sits above the backdrop but below the ships so it can
+     * never hide the player. */
+    draw_shop(m);
 
     int ox = 0, oy = 0;
     if (shake_ > 0.01f) {
@@ -1167,9 +1684,18 @@ void Game::draw(Mui &m, bool debug) const
         mui_rect(&m, x, y, sprite.w, 2, art::color('d'));
         mui_rect(&m, x, y, (sprite.w * a.hp + ally_spec(a.kind).hp - 1) / ally_spec(a.kind).hp, 2, art::color('E'));
     }
+    /* ---- floating base: hull bar and two turrets ---- */
+    if (base_.alive) {
+        float by = base_.y + std::sin(base_.bob * 1.6f) * 1.5f;
+        draw_sprite_centered(m, art::base, base_.x, by, ox, oy, art::color('w'), base_.hurt > 0.0f ? 110 : 0);
+        int bw = 26, bx = (int)base_.x - bw / 2 + ox, byy = (int)by - art::base.h / 2 - 4 + oy;
+        mui_rect(&m, bx, byy, bw, 2, art::color('d'));
+        mui_rect(&m, bx, byy, (bw * base_.hp + base_.max_hp - 1) / base_.max_hp, 2, art::color('C'));
+    }
     for (const Bullet &b : abullets_) {
         if (!b.alive) continue;
-        draw_sprite_centered(m, art::bullet_ally, b.x, b.y, ox, oy, art::color('G'), b.damage > 1 ? 120 : 0);
+        if (b.kind == 4) draw_sprite_centered(m, art::laser, b.x, b.y, ox, oy, 0, 0);
+        else draw_sprite_centered(m, art::bullet_ally, b.x, b.y, ox, oy, art::color('G'), b.damage > 1 ? 120 : 0);
     }
     /* ---- bullets ---- */
     for (int i = 0; i < MAX_PBULLETS; ++i) {
@@ -1208,10 +1734,28 @@ void Game::draw(Mui &m, bool debug) const
             tint = art::color('w');
             alpha = ((int)(p_.invuln * 14.0f) % 2 == 0) ? 35 : 115;
         }
-        draw_sprite_centered(m, art::player, p_.x, p_.y, ox, oy, tint, alpha);
+        draw_sprite_centered(m, player_sprite(), p_.x, p_.y, ox, oy, tint, alpha);
         /* engine flame flickers with movement */
         uint32_t flame = (int)(p_.engine_phase) % 2 == 0 ? art::color('y') : art::color('o');
         mui_rect(&m, (int)p_.x - 1 + ox, (int)p_.y + 6 + oy, 3, 2, flame);
+    }
+
+    /* ---- heal shield: one bubble per protected ship, drawn over everything so
+     * the player can always see what is currently immune ---- */
+    if (shield_t_ > 0.0f) {
+        draw_shield_ring(m, p_.x, p_.y, 12.0f, 13.0f, ox, oy);
+        for (const Ally &a : allies_) {
+            if (!a.alive) continue;
+            draw_shield_ring(m, a.x, a.y, (float)art::ally[a.kind].w * 0.5f + 4.0f,
+                             (float)art::ally[a.kind].h * 0.5f + 4.0f, ox, oy);
+        }
+        if (base_.alive) draw_shield_ring(m, base_.x, base_.y, base_half_w() + 4.0f, base_half_h() + 4.0f, ox, oy);
+    }
+
+    /* ---- "+1 HULL" floater above whatever the base just repaired ---- */
+    if (heal_float_t_ > 0.0f) {
+        int fy = (int)(heal_float_y_ - (1.0f - heal_float_t_ / 0.8f) * 9.0f) + oy;
+        mui_text_center(&m, (int)heal_float_x_ + ox, fy, "+1", art::color('E'), 1);
     }
 
     /* ---- fairness corridor overlay (debug only) ---- */
@@ -1263,6 +1807,11 @@ void Game::draw(Mui &m, bool debug) const
                   dir_.output().max_bullets, (double)dir_.output().bullet_speed, (double)dir_.output().fire_interval);
         mui_textf(&m, 4, by + TRICK_COUNT * 8 + 21, m.th.good, 1,
                   "ALLY ML %u updates  KILLS %d  BLOCKS %d", ally_policy_.steps, st_.ally_kills, st_.intercepted);
+        mui_textf(&m, 4, by + TRICK_COUNT * 8 + 30, m.th.good, 1, "panel: MK%d %d-shot dmg %d | shield %.0fs | base %s",
+                  ship_level_ + 1, ship_volley(), ship_damage(), (double)shield_t_,
+                  base_.alive ? "up" : "none");
+        mui_textf(&m, 4, by + TRICK_COUNT * 8 + 39, m.th.good, 1, "credits %d  shop %s sel %d  absorbed %d", credits_,
+                  shop_open_ ? "open" : "closed", shop_sel_, st_.shielded_hits);
     }
 }
 

@@ -54,7 +54,9 @@ void Game::reset_allies(bool keep_learning)
 
 bool Game::recruit(int kind)
 {
-    if (over_ || kind < 0 || kind >= AK_COUNT) return false;
+    /* The command panel owns the keyboard while it is focused: fleet hotkeys are
+     * ignored there, exactly like movement and fire. */
+    if (over_ || shop_open_ || kind < 0 || kind >= AK_COUNT) return false;
     const AllySpec &spec = SPECS[kind];
     fleet_message_t_ = 2.5f;
     if (allies_alive() >= MAX_ALLIES) {
@@ -95,6 +97,15 @@ void Game::finish_ally_policy(Ally &a, float reward)
 void Game::damage_ally(Ally &a, int amount, bool protecting)
 {
     if (!a.alive || a.hurt > 0.0f) return;
+    /* The heal shield covers the whole fleet: the hull is untouched, the shot
+     * that got through is still consumed, and a protective interception still
+     * counts as one. */
+    if (shield_t_ > 0.0f) {
+        if (protecting) st_.intercepted = counter((int64_t)st_.intercepted + 1);
+        st_.shielded_hits = counter((int64_t)st_.shielded_hits + 1);
+        add_particle(a.x, a.y, 0.0f, -12.0f, 0.25f, 2, art::color('C'), 2);
+        return;
+    }
     a.hp -= amount;
     a.hurt = 0.22f;
     if (a.policy_valid) a.reward += protecting ? 0.45f : -0.35f;
@@ -199,7 +210,7 @@ void Game::update_allies(float dt)
                 (float)a.hp / (float)spec.hp,
                 threat ? bounded((threat->x - a.x) / 80.0f, -1, 1) : 0,
                 threat ? bounded((threat->y - a.y) / 80.0f, -1, 1) : 0,
-                threat ? 1.0f : 0.0f, (float)a.kind / 3.0f, (float)p_.hp / 3.0f,
+                threat ? 1.0f : 0.0f, (float)a.kind / 3.0f, (float)p_.hp / (float)p_.max_hp,
                 target ? 1.0f : 0.0f, 1.0f
             };
             std::memcpy(a.features, f, sizeof(f));
@@ -273,7 +284,9 @@ void Game::update_ally_bullets(float dt)
             if (b.policy_valid) ally_policy_.train_policy(b.features, b.action, e.hp <= 0 ? 0.9f : 0.4f, 0.015f);
             if (e.hp <= 0) {
                 kill_enemy(k, true);
-                st_.ally_kills = counter((int64_t)st_.ally_kills + 1);
+                /* Base turret lasers are credited to the base, not the fleet. */
+                if (b.kind == 4) st_.base_kills = counter((int64_t)st_.base_kills + 1);
+                else st_.ally_kills = counter((int64_t)st_.ally_kills + 1);
             } else {
                 aud_play(SFX_HIT_ENEMY, 1.0f);
                 add_particle(b.x, b.y, 0, 8, 0.15f, 2, art::color('E'), 0);
@@ -293,8 +306,27 @@ void Game::draw_fleet(Mui &m) const
     else std::snprintf(wallet, sizeof(wallet), "CREDIT %dM", credits_ / 1000000);
     mui_text(&m, 4, y + 3, wallet, m.th.good, 1);
     mui_textf(&m, 120, y + 3, m.th.text, 1, "FLEET %d/4", allies_alive());
-    if (fleet_message_t_ > 0) mui_text_right(&m, 380, y - 10, fleet_message_, m.th.good, 1);
-    mui_text_right(&m, 380, y + 3, "1-4 BUY  |  KILLS REFILL", m.th.text_dim, 1);
+    if (fleet_message_t_ > 0) mui_text(&m, 4, y - 10, fleet_message_, m.th.good, 1);
+    if (shop_open_) {
+        /* The panel above can be crossed by the fleet hovering in that corner;
+         * this strip cannot be covered by anything, so the focused row's price
+         * or its blocking reason always stays readable here. */
+        char status[16], detail[16], line[44];
+        shop_row_text(shop_sel_, status, (int)sizeof(status), detail, (int)sizeof(detail));
+        if (!shop_available(shop_sel_)) {
+            std::snprintf(line, sizeof(line), "%s  %s", shop_name(shop_sel_), detail);
+            mui_text_right(&m, 380, y + 3, line, m.th.warn, 1);
+        } else if (credits_ < shop_price(shop_sel_)) {
+            std::snprintf(line, sizeof(line), "%s  %d CR NEEDED", shop_name(shop_sel_),
+                          shop_price(shop_sel_) - credits_);
+            mui_text_right(&m, 380, y + 3, line, m.th.text, 1);
+        } else {
+            std::snprintf(line, sizeof(line), "%s  %d  ENTER=BUY", shop_name(shop_sel_), shop_price(shop_sel_));
+            mui_text_right(&m, 380, y + 3, line, m.th.accent, 1);
+        }
+    } else {
+        mui_text_right(&m, 380, y + 3, "1-4 BUY  |  TAB COMMAND", m.th.text_dim, 1);
+    }
     for (int i = 0; i < AK_COUNT; ++i) {
         const AllySpec &spec = SPECS[i];
         uint32_t color = credits_ >= spec.cost && allies_alive() < MAX_ALLIES ? m.th.good : m.th.text_dim;

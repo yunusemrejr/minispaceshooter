@@ -14,7 +14,7 @@ Build requirements: `build-essential`, `libx11-dev`, and `libxext-dev`.
 On a Wayland desktop the game uses the optional **SDL2 runtime** (`libsdl2-2.0-0`) for native windows. SDL development headers are not required. On X11, or when native Wayland is unavailable, it uses the existing Xlib renderer. Audio loads ALSA/PulseAudio dynamically and can run silently.
 
 ```bash
-./run.sh test         # 28 headless regression tests
+./run.sh test         # 33 headless regression tests
 ./run.sh shots        # screenshots of every screen, no display required
 ./run.sh strict       # separate build with warnings treated as errors
 ./run.sh sanitize     # AddressSanitizer, UBSan and float-cast checks
@@ -58,6 +58,8 @@ MSS_NO_SHM=1 MSS_VIDEO_BACKEND=x11 ./run.sh --verify-present 120
 | Arrows / WASD | Move |
 | Space / Z / J | Fire |
 | Esc / P | Pause |
+| Tab | Focus the bottom-right command panel (again to leave) |
+| Arrows + Enter (panel focused) | Choose and buy a panel option |
 | Enter / Space | Confirm menus |
 | 1 / 2 / 3 / 4 (or numpad) | Buy Scout / Wing / Cruiser / Titan |
 | M | Mute all audio |
@@ -66,7 +68,21 @@ MSS_NO_SHM=1 MSS_VIDEO_BACKEND=x11 ./run.sh --verify-present 120
 | F1 | Learning and difficulty overlay |
 | `-` / `=` or F2 / F3 | Integer pixel scale |
 
-Start with three hearts. Every fifth level repairs one heart, up to three. Death ends the run and resets the next run to level 1. Restarting or returning to the title from pause records the run first. Test/autoplay/frame-limited/headless modes never modify the real save.
+Start with three hearts. Every fifth level repairs one heart, up to the current hull cap. Death ends the run and resets the next run to level 1. Restarting or returning to the title from pause records the run first. Test/autoplay/frame-limited/headless modes never modify the real save.
+
+## Command panel
+
+The bottom-right corner of the playfield holds three extra options. **Tab** focuses the panel, the **arrow keys** pick a row, **Enter** buys it, and **Tab** (or **Esc**) leaves again. While the panel is focused the ship holds still and stops firing and the fleet hotkeys are ignored, but the world keeps running — shopping mid-fight is a deliberate risk. A successful purchase closes the panel and hands the controls straight back; a refused one stays open and says why in the footer. The row you are on is also echoed in the strip just above the fleet bar, so its price — or the reason it cannot be bought — stays readable even when your fleet hovers over the panel.
+
+All three draw from the same run wallet as the fleet, so spending never lowers the score or medal progress. Prices climb with the ship ladder.
+
+| Row | Cost | What it does |
+| --- | ---: | --- |
+| Heal shield | 1,200 | 60 seconds of protection for the player, every escort and the base. Incoming bullets are consumed, ramming enemies are destroyed and credited to you, and absorbed hits are not reported to the difficulty director as damage. One at a time: the row shows the remaining seconds and cannot be re-bought while it runs. |
+| Floating base | 6,000 | A 120-hull escort that floats with the ship, soaks enemy fire that crosses it, destroys rammers and answers with two alternating turret lasers at 3 damage each. It gives the player one heart every 7 seconds, or two hull points to the most damaged escort, and slowly repairs itself while unhurt. A destroyed base frees its row and can be bought again. |
+| Ship upgrade | 700, then +400 per level | Ten levels, each improving the ship: 1 to 6 shots per trigger pull, 1 to 3 damage per shot, 0.255 s down to 0.185 s reload, and one extra maximum heart per level (filled on purchase). The model changes with the tier from MK2 to MK5, so a level-10 ship is visibly a different ship. The row reads MAX at MK10. |
+
+Hearts therefore grow from 3 to 13 over the ladder, while every fifth level still repairs one heart up to that cap. Shield, base, upgrades and credits all reset with the fleet when the run ends.
 
 ## Your allied fleet
 
@@ -156,12 +172,12 @@ Only earned medals update their historical records. The history retains the late
 - `src/c/platform_x11.c`: X11 transport and platform dispatch, timing and scaling.
 - `src/c/platform_sdl.c`: optional native Wayland window/input transport via SDL2's stable Linux ABI.
 - `src/c/audio.c`, `minui.*`, `font5x7.*`: audio, UI and font.
-- `src/cpp/game.*`, `allies.cpp`, `director.*`, `ml.*`: simulation, fleet economy/combat, fairness and learning.
+- `src/cpp/game.*`, `allies.cpp`, `director.*`, `ml.*`: simulation, fleet economy/combat, command panel purchases, fairness and learning.
 - `src/cpp/save.*`, `limits.hpp`: persistence and bounded counters.
-- `tests/selftest.cpp`: 28 tests covering fleet purchases, damage, destruction, friendly shot attribution, adaptive fleet learning, music/SFX mixing and mute behavior, plus learners, drift, exact policy gradients, reward attribution, delayed labels, real shot/spawn limits, repairs, integer boundaries, save corruption, forced short writes and concurrent writers. Includes 24,000 frames of fleet combat, 108,000 frames of game fairness/soak tests and 200,000 director ticks.
+- `tests/selftest.cpp`: 33 tests covering fleet purchases, damage, destruction, friendly shot attribution, adaptive fleet learning, command panel rows and prices, shield absorption without director damage, base escort/heal/rebuy behaviour, the ten-step ship ladder, music/SFX mixing and mute behavior, plus learners, drift, exact policy gradients, reward attribution, delayed labels, real shot/spawn limits, repairs, integer boundaries, save corruption, forced short writes and concurrent writers. Includes 24,000 frames of fleet combat, 108,000 frames of game fairness/soak tests and 200,000 director ticks.
 - `tests/audio_smoke.c`: optional playback and audio-thread control/shutdown regression.
 - `tests/window_smoke.c`: optional real-display test, including native input aliases, quick taps, resize presentation, focus loss and close events.
 
-Validation on the development machine: strict build and all 28 tests passed; AddressSanitizer/UBSan/float-cast checks passed with leak detection disabled because the sandbox's LeakSanitizer cannot run. A real native Wayland autoplay completed all seven gameplay/purchase/learning checks, and the native window smoke test passed. The fleet HUD, all four ally types, controls, debug overlay and summary screens were visually inspected. Both native PulseAudio playback and the ALSA audio smoke test reported zero output errors; system speaker volume remains under user control. ThreadSanitizer found no races in the game audio worker when exercised against a paced test backend. The run against the installed, uninstrumented PulseAudio library reported a warning inside `libpulsecommon` during initialization, so it is not a clean full-stack ThreadSanitizer result. These checks do not establish long-session human balance, leak freedom, or compatibility with every compositor.
+Validation on the development machine: the strict build (`-Werror`) and the AddressSanitizer/UBSan/float-cast build each passed all 33 headless tests, with leak detection disabled because the sandbox's LeakSanitizer cannot inspect processes. The scripted real-window autoplay completed all twelve checks, covering the command panel end to end: Tab focuses it, the arrows move the selection, the ship and the 1-4 fleet hotkeys stay frozen while it is focused, Tab returns control, and Enter buys the selected upgrade. The window smoke test passed on the native Wayland window, including input aliases, quick taps and held-key edges, and the audio smoke test reported playback with zero output errors. Rendered frames of every screen were regenerated and inspected, including the new command-panel frame with the shield up, the base escorting and the level-10 ship: panel rows and the fleet-bar readout, the shield bubbles on the player, escorts and base, the MK2-MK5 models, the floating base and its turret laser all render as intended. ThreadSanitizer previously found no races in the game audio worker when exercised against a paced test backend; the run against the installed, uninstrumented PulseAudio library reported a warning inside `libpulsecommon` during initialization, so it is not a clean full-stack ThreadSanitizer result. These checks do not establish long-session human balance, leak freedom, or compatibility with every compositor.
 
 SDL API references: [video initialization](https://wiki.libsdl.org/SDL2/SDL_VideoInit), [window surface lifetime](https://wiki.libsdl.org/SDL2/SDL_GetWindowSurface), [event ABI](https://wiki.libsdl.org/SDL2/SDL_Event).

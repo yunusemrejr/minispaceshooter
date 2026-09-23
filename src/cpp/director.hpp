@@ -114,6 +114,9 @@ struct DirectorInput {
     int level = 1;
     float score = 0.0f;
     int player_hp = 3;
+    /* Hull capacity, so the models can read "fraction of hull left" instead of
+     * assuming the stock three hearts once the upgrade ladder is in play. */
+    int player_max_hp = 3;
 };
 
 struct DirectorOutput {

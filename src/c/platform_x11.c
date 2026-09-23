@@ -84,6 +84,7 @@ static const KeyBind BINDS[] = {
     {XK_space, PK_FIRE},  {XK_z, PK_FIRE},      {XK_j, PK_FIRE},
     {XK_Return, PK_ENTER},{XK_KP_Enter, PK_ENTER},{XK_space, PK_ENTER},
     {XK_Escape, PK_BACK},
+    {XK_Tab, PK_TAB},
     {XK_p, PK_PAUSE},     {XK_P, PK_PAUSE},
     {XK_m, PK_MUTE},      {XK_M, PK_MUTE},
     {XK_bracketleft, PK_VOL_DOWN},  {XK_bracketright, PK_VOL_UP},

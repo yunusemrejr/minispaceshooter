@@ -22,6 +22,13 @@ struct Sprite {
 namespace art {
 
 extern Sprite player;
+/* Upper ship models for the upgrade ladder (tiers 1..4, every three levels).
+ * They keep the same silhouette language as the stock fighter: white canopy,
+ * cyan hull, engine flame, growing wings and more gun mounts. */
+extern Sprite player_mk[4];
+/* The floating base and the laser bolt its turrets fire. */
+extern Sprite base;
+extern Sprite laser;
 extern Sprite ally[4];
 extern Sprite bullet_ally;
 extern Sprite enemy_grunt;

@@ -155,6 +155,7 @@ static void read_keys(uint8_t *down)
     down[PK_ENTER] = S.keys[40] || S.keys[88];
     down[PK_BACK] = S.keys[41];
     down[PK_PAUSE] = S.keys[19];
+    down[PK_TAB] = S.keys[43];
     down[PK_MUTE] = S.keys[16];
     down[PK_VOL_DOWN] = S.keys[47];
     down[PK_VOL_UP] = S.keys[48];

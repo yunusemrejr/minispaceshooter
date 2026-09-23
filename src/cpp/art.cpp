@@ -67,6 +67,42 @@ static const char *const PLAYER_ROWS[] = {
     "kccCCCcck", "kcCCCCCck", "kc.kCk.ck", "k..kCk..k", "...kok...",
 };
 
+/* Upper models for the upgrade ladder: MK2 11x11, MK3 11x13, MK4 13x13,
+ * MK5 13x15.  Each step keeps the stock silhouette language (white canopy,
+ * cyan hull, engine flame) and adds wing mounts, hull plating and trim. */
+static const char *const PLAYER_MK2_ROWS[] = {
+    "....kCk....", "...kkCkk...", "...kCwCk...", "..kcCCCck..", ".kccCCCcck.", "kccCCCCCcck",
+    "kcCCwCwCCck", "kg.kCCCk.gk", "kk..kCk..kk", "....kCk....", "....kok....",
+};
+static const char *const PLAYER_MK3_ROWS[] = {
+    "....kCk....", "...kkCkk...", "...kCwCk...", "..kcCCCck..", ".kccCCCcck.", "kccCCCCCcck", "kcCCwCwCCck",
+    "kg.kCCCk.gk", "ky.kCCCk.yk", "kk..kCk..kk", "....kCk....", "....kCk....", "...kokok...",
+};
+static const char *const PLAYER_MK4_ROWS[] = {
+    ".....kCk.....", "....kkCkk....", "....kCwCk....", "...kcCCCck...", "..kccCCCcck..", ".kccCCCCCcck.",
+    "kccCCwCwCCcck", "kgyyCCCCCyygk", "kgy.kCCCk.ygk", "kk..kCCCk..kk", "....kCCCk....", "....kCkCk....",
+    "...kokokok...",
+};
+static const char *const PLAYER_MK5_ROWS[] = {
+    ".....kCk.....", "....kkCkk....", "....kCwCk....", "...kcCwCck...", "...kcCCCck...", "..kccCCCcck..",
+    ".kccCCCCCcck.", "kccCCwCwCCcck", "kgvvCCCCCvvgk", "kgv.kCCCk.vgk", "kkg.kCCCk.gkk", "kk..kCCCk..kk",
+    "....kCwCk....", "....kCkCk....", "..kokokokok..",
+};
+
+/* Floating base, 19x13: armoured slab, cyan reactor core, two turrets under the
+ * hull and a thruster beneath each one. */
+static const char *const BASE_ROWS[] = {
+    "..kkkkkkkkkkkkkkk..", ".kgggggggggggggggk.", ".kgWWWWWWWWWWWWWgk.", "kgWccCCCCCccWWWWWgk",
+    "kgWWWCCwCwCCWWWWWgk", "kgWWWCCCCCCCWWWWWgk", ".kgWWWWWWWWWWWWWgk.", ".kgggggggggggggggk.",
+    "..kkkkkkkkkkkkkkk..", "...kggk.....kggk...", "...koyk.....koyk...", "...kkkk.....kkkk...",
+    "....oo.......oo....",
+};
+
+/* Turret laser: bright core, cyan jacket, one teal trailing pixel. */
+static const char *const LASER_ROWS[] = {
+    "kCk", "kwk", "kwk", "kwk", "kwk", "kCk", ".c.",
+};
+
 /* Drone: cheap, slow, red core. */
 static const char *const GRUNT_ROWS[] = {
     "..kkkkk..", ".keeeeek.", "kegEEEgek", "kgeeeeegk", "kgrrrrrgk", ".kgrrrgk.", "..kg.gk..", "...k.k...",
@@ -140,12 +176,15 @@ static const char *const FLASH_BIG_ROWS[] = {
 };
 
 /* ------------------------------------------------------------------ storage */
-#define SPRITE_MAX_W 13
-#define SPRITE_MAX_H 11
+#define SPRITE_MAX_W 19 /* widest authored shape: the floating base */
+#define SPRITE_MAX_H 15 /* tallest authored shape: the MK5 fighter */
 
 static uint32_t s_ally[4][13 * 13];
 static uint32_t s_bullet_ally[3 * 4];
 static uint32_t s_player[9 * 11];
+static uint32_t s_player_mk[4][13 * 15];
+static uint32_t s_base[19 * 13];
+static uint32_t s_laser[3 * 7];
 static uint32_t s_grunt[9 * 8];
 static uint32_t s_wasp[9 * 8];
 static uint32_t s_brute[13 * 11];
@@ -163,6 +202,12 @@ static uint32_t s_flash_big[11 * 11];
 Sprite ally[4] = {{s_ally[0], 7, 7}, {s_ally[1], 9, 9}, {s_ally[2], 11, 11}, {s_ally[3], 13, 13}};
 Sprite bullet_ally{s_bullet_ally, 3, 4};
 Sprite player{s_player, 9, 11};
+Sprite player_mk[4] = {{s_player_mk[0], 11, 11},
+                       {s_player_mk[1], 11, 13},
+                       {s_player_mk[2], 13, 13},
+                       {s_player_mk[3], 13, 15}};
+Sprite base{s_base, 19, 13};
+Sprite laser{s_laser, 3, 7};
 Sprite enemy_grunt{s_grunt, 9, 8};
 Sprite enemy_wasp{s_wasp, 9, 8};
 Sprite enemy_brute{s_brute, 13, 11};
@@ -218,6 +263,12 @@ int art_init(void)
     bad += build(ally[3].px, TITAN_ROWS, 13, 13, id);
     bad += build(bullet_ally.px, BULLET_ALLY_ROWS, 3, 4, id);
     bad += build(player.px, PLAYER_ROWS, 9, 11, id);
+    bad += build(player_mk[0].px, PLAYER_MK2_ROWS, 11, 11, id);
+    bad += build(player_mk[1].px, PLAYER_MK3_ROWS, 11, 13, id);
+    bad += build(player_mk[2].px, PLAYER_MK4_ROWS, 13, 13, id);
+    bad += build(player_mk[3].px, PLAYER_MK5_ROWS, 13, 15, id);
+    bad += build(base.px, BASE_ROWS, 19, 13, id);
+    bad += build(laser.px, LASER_ROWS, 3, 7, id);
     bad += build(enemy_grunt.px, GRUNT_ROWS, 9, 8, id);
     bad += build(enemy_wasp.px, WASP_ROWS, 9, 8, id);
     bad += build(enemy_brute.px, BRUTE_ROWS, 13, 11, id);

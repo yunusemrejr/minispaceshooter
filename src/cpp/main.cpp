@@ -158,7 +158,7 @@ void render_title(App &a)
 
     mui_text_center(&m, IW / 2, 178, "the game learns how you fly", m.th.text_dim, 1);
     mui_text_center(&m, IW / 2, 188, "and never lets the ceiling end", m.th.text_dim, 1);
-    draw_footer_hints(m, "ARROWS MOVE   SPACE FIRE   ESC PAUSE   F1 ML DEBUG   M MUTE");
+    draw_footer_hints(m, "ARROWS MOVE   SPACE FIRE   TAB COMMAND   ESC PAUSE   F1 ML DEBUG   M MUTE");
 
     if (chosen >= 0) {
         aud_play(SFX_UI, 1.0f);
@@ -297,16 +297,19 @@ void render_controls(App &a)
         {"ARROWS / WASD", "fly your ship"},
         {"SPACE / Z", "fire"},
         {"1 / 2 / 3 / 4", "buy scout / wing / cruiser / titan"},
+        {"TAB", "focus / leave the command panel"},
+        {"ARROWS + ENTER", "choose and buy a panel option"},
         {"ESC / P", "pause"},
         {"ENTER", "confirm"},
         {"M / N", "mute all / toggle calm music"},
         {"[ ]", "volume down / up"},
         {"- = / F2 F3", "pixel scale"},
         {"F1", "ML + difficulty overlay"},
-        {"REPAIR", "+1 heart every 5 levels (max 3)"},
+        {"PANEL", "heal shield, floating base, ship upgrades"},
+        {"REPAIR", "+1 heart every 5 levels (up to hull cap)"},
         {"CREDITS", "kills + levels refill; score stays"},
         {"ALLIES", "4 slots; take damage; learn as a team"},
-        {"DEATH", "fleet resets; record stays"},
+        {"DEATH", "fleet and upgrades reset; record stays"},
     };
     int y = body + 4;
     for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); ++i, y += 11) {
@@ -452,6 +455,11 @@ struct Autoplay {
     int saw_fire = 0;
     int saw_score = 0;
     int saw_ally = 0, saw_ally_learning = 0;
+    /* command panel checks */
+    int saw_shop_open = 0, saw_shop_freeze = 0, saw_shop_restore = 0, saw_shop_buy = 0, shop_moved = 0;
+    int sel_changes = 0, last_sel = 0, buy_level_before = 0, shop_buying = 0, shop_buy_frame = 0;
+    float panel_x = -1.0f;
+    float settle_x = -1.0f;
     float start_x = -1.0f;
     int start_score = 0;
 
@@ -499,9 +507,67 @@ void autoplay_step(App &a, Autoplay &ap, PlatInput &in)
     /* Keep the script alive across deaths, and probe the pause screen once a
      * second whenever we are actually playing, resuming immediately. */
     if (a.screen == SC_OVER) ap.press(PK_ENTER);
-    if (a.screen == SC_PLAY && f > 20 && (f % 60) == 0) ap.press(PK_BACK);
+    if (a.screen == SC_PLAY && f > 20 && (f % 60) == 0 && !a.game.shop_open()) ap.press(PK_BACK);
     if (a.screen == SC_PAUSE) ap.press(PK_ENTER);
-    if (a.screen == SC_PLAY && a.game.credits() >= ally_spec(AK_SCOUT).cost && f % 30 == 7) ap.press(PK_ALLY_1);
+    /* One fleet purchase proves the hotkey path; after that the wallet is left
+     * alone so it can actually reach the command panel's upgrade price. */
+    if (a.screen == SC_PLAY && !ap.saw_ally && a.game.credits() >= ally_spec(AK_SCOUT).cost && f % 30 == 7)
+        ap.press(PK_ALLY_1);
+
+    /* ---- command panel ----
+     * Phase 1 (f560..700): open with Tab, hold a flight key to prove the ship is
+     * frozen while the panel is focused, move the selection with the arrows,
+     * close with Tab, then prove the flight controls come back.
+     * Phase 2 (afterwards): buy a real ship upgrade through Enter as soon as the
+     * wallet can afford one -- the same key edges a player would send. */
+    if (a.screen == SC_PLAY) {
+        if (f == 560) {
+            ap.panel_x = a.game.player_x();
+            ap.settle_x = a.game.player_x();
+            ap.press(PK_TAB);
+        }
+        if (f > 560 && f < 640) {
+            ap.press(PK_RIGHT); /* held flight key: must not steer */
+            if (f == 566 || f == 590) ap.press(PK_DOWN);
+            if (f == 600) ap.press(PK_UP);
+            if (a.game.shop_open()) {
+                ap.saw_shop_open = 1;
+                /* The ship keeps its smoothed momentum, so it coasts a few pixels
+                 * to a stop exactly as if the key were released.  A held key must
+                 * produce no sustained motion, and none at all once it settles. */
+                if (std::fabs(a.game.player_x() - ap.panel_x) > 8.0f) ap.shop_moved = 1;
+                if (f == 575) ap.settle_x = a.game.player_x();
+                else if (f > 575 && std::fabs(a.game.player_x() - ap.settle_x) > 1.0f) ap.shop_moved = 1;
+                if (a.game.shop_selection() != ap.last_sel) {
+                    ap.last_sel = a.game.shop_selection();
+                    ap.sel_changes++;
+                }
+            }
+        }
+        if (f == 640) ap.press(PK_TAB);
+        if (f > 640 && f <= 700) ap.press(PK_LEFT);
+        if (f == 700 && std::fabs(a.game.player_x() - ap.panel_x) > 3.0f) ap.saw_shop_restore = 1;
+        if (f > 700 && !ap.saw_shop_buy) {
+            if (!ap.shop_buying) {
+                if (f % 30 == 0 && !a.game.shop_open() && a.game.ship_level() < SHIP_MAX_LEVEL &&
+                    a.game.credits() >= a.game.shop_price(SHOP_UPGRADE)) {
+                    ap.shop_buying = 1;
+                    ap.shop_buy_frame = f;
+                    ap.buy_level_before = a.game.ship_level();
+                    ap.press(PK_TAB);
+                }
+            } else {
+                int age = f - ap.shop_buy_frame;
+                if (age == 2 || age == 4) ap.press(PK_DOWN); /* SHIELD -> BASE -> UPGRADE */
+                if (age == 6) ap.press(PK_ENTER);
+                if (age == 8) {
+                    if (a.game.ship_level() > ap.buy_level_before) ap.saw_shop_buy = 1;
+                    if (a.game.shop_open()) ap.press(PK_TAB); /* refused: close and retry later */
+                    ap.shop_buying = 0;
+                }
+            }
+        }
+    }
     if (f == 360) ap.press(PK_DEBUG);
     if (f == 400) ap.press(PK_MUTE);
     if (f == 420) ap.press(PK_VOL_UP);
@@ -553,6 +619,11 @@ int autoplay_report(const Autoplay &ap)
         {"escape reaches the pause screen", ap.saw_pause},
         {"earned credits buy an ally with key 1", ap.saw_ally},
         {"deployed allies update their learning policy", ap.saw_ally_learning},
+        {"tab opens the command panel", ap.saw_shop_open},
+        {"arrows move the panel selection", ap.sel_changes >= 2},
+        {"the ship holds still while the panel is focused", ap.saw_shop_open && !ap.shop_moved},
+        {"tab returns control to the ship", ap.saw_shop_restore},
+        {"enter buys the selected panel item", ap.saw_shop_buy},
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); ++i) {
@@ -648,16 +719,22 @@ void render_sprite_sheet(App &a)
         int x, y, scale, label_y;
     };
     const Item items[] = {
-        {&art::player, "PLAYER", 8, 20, 3, 55},
-        {&art::enemy_grunt, "GRUNT", 58, 20, 3, 55},
-        {&art::enemy_wasp, "WASP", 108, 20, 3, 55},
-        {&art::enemy_brute, "BRUTE", 156, 20, 3, 55},
-        {&art::enemy_ghost, "GHOST", 262, 20, 3, 55},
-        {&art::medal[MEDAL_BRONZE], "BRONZE", 8, 80, 3, 116},
-        {&art::medal[MEDAL_SILVER], "SILVER", 58, 80, 3, 116},
-        {&art::medal[MEDAL_GOLD], "GOLD", 108, 80, 3, 116},
-        {&art::medal[MEDAL_PLATINUM], "PLATINUM", 158, 80, 3, 116},
-        {&art::medal[MEDAL_DIAMOND], "DIAMOND", 218, 80, 3, 116},
+        {&art::player, "PLAYER", 6, 18, 2, 50},
+        {&art::player_mk[0], "MK2", 46, 18, 2, 50},
+        {&art::player_mk[1], "MK3", 78, 18, 2, 50},
+        {&art::player_mk[2], "MK4", 110, 18, 2, 50},
+        {&art::player_mk[3], "MK5", 142, 18, 2, 50},
+        {&art::enemy_grunt, "GRUNT", 174, 18, 2, 50},
+        {&art::enemy_wasp, "WASP", 210, 18, 2, 50},
+        {&art::enemy_brute, "BRUTE", 246, 18, 2, 50},
+        {&art::enemy_ghost, "GHOST", 282, 18, 2, 50},
+        {&art::base, "BASE", 316, 18, 2, 50},
+        {&art::laser, "LASER", 360, 18, 2, 50},
+        {&art::medal[MEDAL_BRONZE], "BRONZE", 8, 64, 3, 100},
+        {&art::medal[MEDAL_SILVER], "SILVER", 58, 64, 3, 100},
+        {&art::medal[MEDAL_GOLD], "GOLD", 108, 64, 3, 100},
+        {&art::medal[MEDAL_PLATINUM], "PLATINUM", 158, 64, 3, 100},
+        {&art::medal[MEDAL_DIAMOND], "DIAMOND", 218, 64, 3, 100},
         {&art::bullet_player, "SHOT", 8, 152, 5, 178},
         {&art::bullet_enemy, "ENEMY SHOT", 36, 152, 5, 178},
         {&art::bullet_big, "BIG SHOT", 102, 152, 4, 178},
@@ -672,7 +749,8 @@ void render_sprite_sheet(App &a)
         mui_blit_scaled(&m, it.s->px, it.s->w, it.s->h, it.x, it.y, it.scale, 0);
         mui_text(&m, it.x, it.label_y, it.label, a.theme.text_dim, 1);
     }
-    mui_text(&m, 6, IH - 10, "every sprite is authored as ASCII art in src/cpp/art.cpp", a.theme.text_dim, 1);
+    mui_text(&m, 6, IH - 10, "MK2..MK5 are the upgrade models (MK5 = level 10); BASE and LASER are panel purchases",
+             a.theme.text_dim, 1);
 }
 
 int run_shots(App &a, const char *dir)
@@ -776,7 +854,34 @@ int run_shots(App &a, const char *dir)
     render_sprite_sheet(a);
     shot_one(a, dir, "10-sprite-sheet");
 
-    std::printf("done (10 shots)\n");
+    /* command panel doing all three jobs at once: focused, with the shield up,
+     * the floating base escorting and the ship at the top of the upgrade ladder */
+    a.game.reset(a.rng, 12, a.save.best_score, false);
+    a.game.award_points(60000);
+    for (int k = 0; k < AK_COUNT; ++k) a.game.recruit(k);
+    struct BuyStep {
+        int item;
+        int times;
+    };
+    const BuyStep buys[] = {{SHOP_SHIELD, 1}, {SHOP_BASE, 1}, {SHOP_UPGRADE, SHIP_MAX_LEVEL}};
+    for (size_t b = 0; b < sizeof(buys) / sizeof(buys[0]); ++b) {
+        for (int i = 0; i < buys[b].times; ++i) {
+            a.game.shop_toggle();
+            for (int step = 0; step < buys[b].item; ++step) a.game.shop_move(1);
+            if (!a.game.shop_activate() && a.game.shop_open()) a.game.shop_close();
+        }
+    }
+    t = 0.0f;
+    for (int i = 0; i < 240; ++i) {
+        t += STEP;
+        a.game.update(demo_input(t), STEP);
+    }
+    a.game.shop_toggle(); /* leave the panel focused so the cursor is visible */
+    mui_begin(&a.m, g_pixels, IW, IH, a.theme, MuiInput(), t);
+    a.game.draw(a.m, false);
+    shot_one(a, dir, "11-command-panel");
+
+    std::printf("done (11 shots)\n");
     return 0;
 }
 
@@ -806,7 +911,7 @@ int main(int argc, char **argv)
         else if (std::strcmp(argv[i], "--level") == 0 && i + 1 < argc) start_level = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--debug") == 0) app.debug = true;
         else if (std::strcmp(argv[i], "--reset-save") == 0) reset_save = true;
-        else if (std::strcmp(argv[i], "--autoplay") == 0) autoplay_frames = 1800;
+        else if (std::strcmp(argv[i], "--autoplay") == 0) autoplay_frames = 2100;
         else if (std::strcmp(argv[i], "--focus-self") == 0) focus_self = true;
         else if (std::strcmp(argv[i], "--verify-present") == 0) verify_present = (i + 1 < argc) ? std::atoi(argv[++i]) : 30;
         else if (std::strcmp(argv[i], "--headless") == 0) force_headless = true;
@@ -902,6 +1007,18 @@ int main(int argc, char **argv)
         if (app.screen == SC_PLAY && !in.pressed[PK_BACK] && !in.pressed[PK_PAUSE]) {
             for (int k = 0; k < AK_COUNT; ++k) if (in.pressed[PK_ALLY_1 + k]) app.game.recruit(k);
         }
+        /* ---- bottom-right command panel ----
+         * Tab focuses it (and un-focuses it again); while focused the arrows pick
+         * a row and Enter buys it.  Flight controls are suppressed inside
+         * Game::update for exactly as long as it stays focused. */
+        if (app.screen == SC_PLAY) {
+            if (in.pressed[PK_TAB]) app.game.shop_toggle();
+            if (app.game.shop_open()) {
+                if (in.pressed[PK_UP]) app.game.shop_move(-1);
+                if (in.pressed[PK_DOWN]) app.game.shop_move(1);
+                if (in.pressed[PK_ENTER]) app.game.shop_activate();
+            }
+        }
         if (in.pressed[PK_VOL_DOWN]) aud_adjust_master(-0.04f);
         if (in.pressed[PK_VOL_UP]) aud_adjust_master(0.04f);
 
@@ -933,7 +1050,12 @@ int main(int argc, char **argv)
          * (otherwise pause would resume itself on the very same frame). */
         bool back_consumed = false;
         if (app.screen == SC_PLAY) {
-            if (in.pressed[PK_BACK] || in.pressed[PK_PAUSE]) {
+            if (in.pressed[PK_BACK] && app.game.shop_open()) {
+                /* Esc closes the panel first; a second Esc pauses the game. */
+                app.game.shop_close();
+                back_consumed = true;
+            } else if (in.pressed[PK_BACK] || in.pressed[PK_PAUSE]) {
+                app.game.shop_close(); /* never leave the panel open behind a pause */
                 app.screen = SC_PAUSE;
                 mui_menu_begin(&app.pause_menu, 3);
                 app.pause_menu.glow[0] = 1.0f;
