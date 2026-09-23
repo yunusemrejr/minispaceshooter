@@ -59,7 +59,7 @@ MSS_NO_SHM=1 MSS_VIDEO_BACKEND=x11 ./run.sh --verify-present 120
 | Space / Z / J | Fire |
 | Esc / P | Pause |
 | Tab | Focus the bottom-right command panel (again to leave) |
-| Arrows + Enter (panel focused) | Choose and buy a panel option |
+| Up/Down + Enter (panel focused) | Choose and buy a panel option |
 | Enter / Space | Confirm menus |
 | 1 / 2 / 3 / 4 (or numpad) | Buy Scout / Wing / Cruiser / Titan |
 | M | Mute all audio |
@@ -72,7 +72,7 @@ Start with three hearts. Every fifth level repairs one heart, up to the current 
 
 ## Command panel
 
-The bottom-right corner of the playfield holds three extra options. **Tab** focuses the panel, the **arrow keys** pick a row, **Enter** buys it, and **Tab** (or **Esc**) leaves again. While the panel is focused the ship holds still and stops firing and the fleet hotkeys are ignored, but the world keeps running — shopping mid-fight is a deliberate risk. A successful purchase closes the panel and hands the controls straight back; a refused one stays open and says why in the footer. The row you are on is also echoed in the strip just above the fleet bar, so its price — or the reason it cannot be bought — stays readable even when your fleet hovers over the panel.
+The bottom-right corner of the playfield holds three extra options. **Tab** focuses the panel, the **up/down arrows** pick a row, **Enter** buys it, and **Tab** (or **Esc**) leaves again. While the panel is focused the ship holds still and stops firing and the fleet hotkeys are ignored, but the world keeps running — shopping mid-fight is a deliberate risk. A successful purchase closes the panel and hands the controls straight back; a refused one stays open and says why in the footer. The row you are on is also echoed in the top row of the fleet bar, right of the credit readout, so its price — or the reason it cannot be bought — stays readable even when your fleet hovers over the panel.
 
 All three draw from the same run wallet as the fleet, so spending never lowers the score or medal progress. The shield and the base have fixed prices; only the ship upgrade's price climbs with the ladder.
 
