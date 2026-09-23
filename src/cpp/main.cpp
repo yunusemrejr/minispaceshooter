@@ -456,10 +456,11 @@ struct Autoplay {
     int saw_score = 0;
     int saw_ally = 0, saw_ally_learning = 0;
     /* command panel checks */
-    int saw_shop_open = 0, saw_shop_freeze = 0, saw_shop_restore = 0, saw_shop_buy = 0, shop_moved = 0;
+    int saw_shop_open = 0, saw_shop_restore = 0, saw_shop_buy = 0, shop_moved = 0;
     int sel_changes = 0, last_sel = 0, buy_level_before = 0, shop_buying = 0, shop_buy_frame = 0;
     float panel_x = -1.0f;
     float settle_x = -1.0f;
+    float restore_drift = -1.0f;
     float start_x = -1.0f;
     int start_score = 0;
 
@@ -481,8 +482,11 @@ void autoplay_step(App &a, Autoplay &ap, PlatInput &in)
     if (f == 3) ap.press(PK_ENTER);                       /* title -> play */
     if (f >= 10 && f < 1740) ap.press(PK_FIRE);            /* hold fire */
     /* Aim at observed enemies; a blind sweep can miss every credit threshold
-     * before dying, especially now that audio no longer stalls the frame loop. */
-    if (a.screen == SC_PLAY && f >= 10 && f < 1740) {
+     * before dying, especially now that audio no longer stalls the frame loop.
+     * The command-panel phase below owns the keyboard while it runs, so this
+     * block stays out of its windows: two opposite arrow edges in one frame
+     * would cancel to no movement and make the restore check lie. */
+    if (a.screen == SC_PLAY && f >= 10 && f < 1740 && !(f > 555 && f <= 700)) {
         float x = a.game.player_x();
         if (x > 340.0f) ap.dir = -1;
         if (x < 44.0f) ap.dir = 1;
@@ -545,8 +549,15 @@ void autoplay_step(App &a, Autoplay &ap, PlatInput &in)
             }
         }
         if (f == 640) ap.press(PK_TAB);
-        if (f > 640 && f <= 700) ap.press(PK_LEFT);
-        if (f == 700 && std::fabs(a.game.player_x() - ap.panel_x) > 3.0f) ap.saw_shop_restore = 1;
+        if (f > 640 && f <= 700) {
+            /* Steer away from the nearer wall: holding a blocked direction would
+             * make "the controls came back" indistinguishable from "still frozen". */
+            ap.press(a.game.player_x() > PLAY_W * 0.5f ? PK_LEFT : PK_RIGHT);
+        }
+        if (f == 700) {
+            ap.restore_drift = std::fabs(a.game.player_x() - ap.panel_x);
+            if (ap.restore_drift > 3.0f) ap.saw_shop_restore = 1;
+        }
         if (f > 700 && !ap.saw_shop_buy) {
             if (!ap.shop_buying) {
                 if (f % 30 == 0 && !a.game.shop_open() && a.game.ship_level() < SHIP_MAX_LEVEL &&
@@ -629,6 +640,11 @@ int autoplay_report(const Autoplay &ap)
     for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); ++i) {
         std::printf("  %s - %s\n", checks[i].ok ? "ok  " : "FAIL", checks[i].what);
         if (!checks[i].ok) failed++;
+    }
+    if (!ap.saw_shop_restore) {
+        /* A flaky restore check must say how far the ship actually moved. */
+        std::printf("    (panel restore drift was %.1f px; the ship must move > 3 px after Tab)\n",
+                    (double)ap.restore_drift);
     }
     std::printf("autoplay: %d/%d checks passed\n", (int)(sizeof(checks) / sizeof(checks[0])) - failed,
                 (int)(sizeof(checks) / sizeof(checks[0])));
@@ -728,8 +744,8 @@ void render_sprite_sheet(App &a)
         {&art::enemy_wasp, "WASP", 210, 18, 2, 50},
         {&art::enemy_brute, "BRUTE", 246, 18, 2, 50},
         {&art::enemy_ghost, "GHOST", 282, 18, 2, 50},
-        {&art::base, "BASE", 316, 18, 2, 50},
-        {&art::laser, "LASER", 360, 18, 2, 50},
+        {&art::base, "BASE", 310, 18, 2, 50},
+        {&art::laser, "LASER", 352, 18, 2, 50},
         {&art::medal[MEDAL_BRONZE], "BRONZE", 8, 64, 3, 100},
         {&art::medal[MEDAL_SILVER], "SILVER", 58, 64, 3, 100},
         {&art::medal[MEDAL_GOLD], "GOLD", 108, 64, 3, 100},
@@ -749,8 +765,7 @@ void render_sprite_sheet(App &a)
         mui_blit_scaled(&m, it.s->px, it.s->w, it.s->h, it.x, it.y, it.scale, 0);
         mui_text(&m, it.x, it.label_y, it.label, a.theme.text_dim, 1);
     }
-    mui_text(&m, 6, IH - 10, "MK2..MK5 are the upgrade models (MK5 = level 10); BASE and LASER are panel purchases",
-             a.theme.text_dim, 1);
+    mui_text(&m, 6, IH - 10, "MK2-MK5: upgrade models  |  BASE + LASER: panel purchases", a.theme.text_dim, 1);
 }
 
 int run_shots(App &a, const char *dir)

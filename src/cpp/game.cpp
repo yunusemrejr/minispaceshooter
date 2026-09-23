@@ -304,8 +304,6 @@ void Game::feed_director(float dt)
     di.player_accuracy = shot_accum_ > 1.0f ? clampf(hit_accum_ / shot_accum_, 0.0f, 1.0f) : 0.35f;
     di.player_dodge_rate = dodge_rate;
     di.near_miss_rate = near_miss_rate_;
-    int hits_recent = 0;
-    (void)hits_recent;
     di.hits_taken_recent = p_.max_hp - p_.hp;
     di.time_since_damage = time_since_damage_;
     int alive = 0, bullets = 0;
@@ -607,7 +605,7 @@ void Game::shop_close()
 
 void Game::shop_move(int delta)
 {
-    if (!shop_open_ || delta == 0) return;
+    if (!shop_open_ || over_ || delta == 0) return;
     int next = shop_sel_ + (delta > 0 ? 1 : -1);
     if (next < 0) next = SHOP_COUNT - 1;
     if (next >= SHOP_COUNT) next = 0;
@@ -628,7 +626,13 @@ bool Game::shop_activate()
         switch (item) {
         case SHOP_SHIELD: shop_feedback("SHIELD IS ALREADY UP"); break;
         case SHOP_BASE: shop_feedback("BASE ALREADY DEPLOYED"); break;
-        default: shop_feedback("SHIP IS AT MK10 (MAX)"); break;
+        default: {
+            /* The stock ship is MK1, so ten upgrade steps end at MK11. */
+            char maxed[28];
+            std::snprintf(maxed, sizeof(maxed), "SHIP IS AT MK%d (MAX)", SHIP_MAX_LEVEL + 1);
+            shop_feedback(maxed);
+            break;
+        }
         }
         aud_play(SFX_UI, 0.75f);
         return false;
@@ -734,7 +738,6 @@ void Game::base_fire(const Enemy &target)
 {
     Base &b = base_;
     int turret = b.turret;
-    b.turret = 1 - b.turret;
     for (Bullet &bul : abullets_) {
         if (bul.alive) continue;
         bul = Bullet();
@@ -752,6 +755,7 @@ void Game::base_fire(const Enemy &target)
         bul.vx = BASE_LASER_SPEED * dx / len;
         bul.vy = BASE_LASER_SPEED * dy / len;
         bul.life = 1.2f;
+        b.turret = 1 - turret; /* alternate mounts only when a bolt really left */
         aud_play(SFX_ALLY_SHOT, 1.35f);
         return;
     }
@@ -1264,6 +1268,10 @@ void Game::damage_player(float amount)
     }
     if (p_.hp <= 0) {
         over_ = true;
+        /* The run is over: drop the panel state so nothing outlives it. */
+        shop_open_ = false;
+        shop_msg_t_ = 0.0f;
+        shop_msg_[0] = '\0';
         st_.deaths = counter((int64_t)st_.deaths + 1);
         dir_.event_player_death();
         for (Ally &a : allies_) if (a.alive) finish_ally_policy(a, -1.0f);

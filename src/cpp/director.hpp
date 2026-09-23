@@ -106,7 +106,7 @@ struct DirectorInput {
     float player_accuracy = 0.0f;  /* 0..1 rolling */
     float player_dodge_rate = 0.0f;
     float near_miss_rate = 0.0f;   /* per second, rolling */
-    int hits_taken_recent = 0;     /* last 5 s */
+    int hits_taken_recent = 0;     /* hull points missing right now (max_hp - hp) */
     float time_since_damage = 99.0f;
     int enemies_alive = 0;
     int enemy_bullets = 0;
